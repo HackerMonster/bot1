@@ -703,7 +703,7 @@ async def create_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 # === ЗАПУСК ===
 
 def main():
-    TOKEN = "ВАШ_ТОКЕН_БОТА"
+    TOKEN = "8584027906:AAEZvDcBZw-ugYDOKT6yOurh6vSS5fljpTY"
     application = Application.builder().token(TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL, lambda u, c: user_ids.add(u.effective_user.id)), group=-1)
     application.add_handler(CommandHandler("start", start_with_code))
