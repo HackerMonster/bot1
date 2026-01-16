@@ -7,14 +7,6 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from telegram.error import BadRequest
 
-# === ИМПОРТ SUBGRAM ===
-try:
-    from utils.subgram_api import get_subgram_sponsors
-    SUBGRAM_ENABLED = True
-except ImportError:
-    logging.warning("SubGram API не найден. Убедитесь, что файл utils/subgram_api.py существует.")
-    SUBGRAM_ENABLED = False
-
 # === НАСТРОЙКИ ===
 
 logging.basicConfig(
@@ -247,10 +239,7 @@ async def generate_human_readable_status(context: ContextTypes.DEFAULT_TYPE) -> 
                 block += f"\n⚠️ КАМПАНИЯ ЗАВЕРШЕНА ({reason})"
             status_lines.append(block)
         status = "\n\n" + "\n\n".join(status_lines) + "\n"
-
-    # Добавляем информацию о SubGram
-    subgram_info = "\nℹ️ SubGram API: " + ("включён" if SUBGRAM_ENABLED else "отключён")
-    return status + subgram_info
+    return status
 
 # === ОТПРАВКА СОХРАНЁННОГО СООБЩЕНИЯ ===
 
@@ -277,23 +266,13 @@ async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_ids.add(user_id)
     await cleanup_expired_campaigns(context)
 
-    # 1. Сначала проверяем SubGram (если включён)
-    if SUBGRAM_ENABLED:
-        response = await get_subgram_sponsors(user_id=user_id, chat_id=update.effective_chat.id)
-        if response:
-            status = response.get("status")
-            if status == "warning":
-                return
-            elif status == "error":
-                logging.warning(f"SubGram API ошибка: {response.get('message')}. Продолжаем локальную проверку.")
-
-    # 2. Локальная проверка подписки
+    # Локальная проверка подписки
     unsubscribed = await get_unsubscribed_channels(user_id, context)
     if unsubscribed:
         await show_subscription_prompt_inplace(update, context)
         return
 
-    # 3. Обработка кода из ссылки
+    # Обработка кода из ссылки
     if context.args:
         code = context.args[0]
         if code not in saved_messages:
@@ -304,7 +283,6 @@ async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         password = data.get('password')
 
         if password:
-            # Проверяем, вводил ли пользователь пароль ранее
             if user_id in user_password_attempts and user_password_attempts[user_id]['code'] == code:
                 entered = update.message.text.strip()
                 attempts = user_password_attempts[user_id].get('attempts', 0)
@@ -324,12 +302,10 @@ async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     return
             else:
-                # Запрашиваем пароль
                 user_password_attempts[user_id] = {'code': code, 'attempts': 0}
                 await update.message.reply_text("🔐 Этот контент защищён паролем.\nВведите пароль:")
                 return
         else:
-            # Без пароля — сразу отправляем
             await send_saved_message(update, context, data)
             return
 
@@ -362,7 +338,7 @@ async def show_subscription_prompt_inplace(update: Update, context: ContextTypes
             "✅ Играй с умом:\n"
             "Наслаждайся возможностями, но не нарушай правила Roblox и не забывай о безопасности!"
         )
-        keyboard = [[InlineKeyboardButton("🔥 Наш канал", url="https://t.me/script_f ")]]
+        keyboard = [[InlineKeyboardButton("🔥 Наш канал", url="https://t.me/script_f")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         if update.callback_query:
             await update.callback_query.message.edit_text(welcome, reply_markup=reply_markup)
@@ -412,18 +388,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "check_sub":
         user_id = query.from_user.id
-
-        # Проверка через SubGram
-        if SUBGRAM_ENABLED:
-            response = await get_subgram_sponsors(user_id=user_id, chat_id=query.message.chat.id)
-            if response:
-                status = response.get("status")
-                if status == "warning":
-                    return  # SubGram сам обработал
-                elif status == "error":
-                    logging.warning(f"SubGram API ошибка: {response.get('message')}. Продолжаем локальную проверку.")
-
-        # Локальная проверка
         unsubscribed = await get_unsubscribed_channels(user_id, context)
         if unsubscribed:
             channel_list = ""
@@ -457,7 +421,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "✅ Играй с умом:\n"
                 "Наслаждайся возможностями, но не нарушай правила Roblox и не забывай о безопасности!"
             )
-            keyboard = [[InlineKeyboardButton("🔥 Наш канал", url="https://t.me/script_f ")]]
+            keyboard = [[InlineKeyboardButton("🔥 Наш канал", url="https://t.me/script_f")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(welcome, reply_markup=reply_markup)
 
@@ -473,7 +437,7 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("✅ Добавить проверку", callback_data="admin_setup")],
         [InlineKeyboardButton("🗑 Удалить проверку", callback_data="admin_unsetup")],
         [InlineKeyboardButton("📋 Статус проверок", callback_data="admin_status")],
-        [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],  # ← НОВОЕ
+        [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton("📨 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton("🔗 Создать ссылку", callback_data="admin_create_link")],
     ]
@@ -489,10 +453,10 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(
             "🔧 Отправьте команду в формате:\n<code>/setup &lt;chat_id&gt; &lt;ссылка&gt; [время/лимит]</code>\n\n"
             "Примеры:\n"
-            "<code>/setup -1001994526641 https://t.me/script_f  30m</code> - на 30 минут\n"
-            "<code>/setup -1001994526641 https://t.me/script_f  1</code> - на 1 участника\n"
-            "<code>/setup -1001994526641 https://t.me/script_f  1h</code> - на 1 час\n"
-            "<code>/setup -1001994526641 https://t.me/script_f  w</code> - навсегда\n\n"
+            "<code>/setup -1001994526641 https://t.me/script_f 30m</code> - на 30 минут\n"
+            "<code>/setup -1001994526641 https://t.me/script_f 1</code> - на 1 участника\n"
+            "<code>/setup -1001994526641 https://t.me/script_f 1h</code> - на 1 час\n"
+            "<code>/setup -1001994526641 https://t.me/script_f w</code> - навсегда\n\n"
             "Единицы времени: s (секунды), m (минуты), h (часы), d (дни)",
             parse_mode="HTML"
         )
@@ -511,7 +475,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         text = await generate_human_readable_status(context)
         buttons = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_back")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
-    elif data == "admin_stats":  # ← НОВОЕ
+    elif data == "admin_stats":
         total_users = len(user_ids)
         total_campaigns = len(active_campaigns)
         total_links = len(saved_messages)
@@ -530,15 +494,20 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["broadcast_mode"] = True
         keyboard = [[InlineKeyboardButton("✖️ Отменить", callback_data="cancel_broadcast")]]
         await query.edit_message_text(
-            "📨 Отправьте сообщение для рассылки (текст, фото, видео и т.д.):",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            "📨 Отправьте сообщение для рассылки (текст, фото, видео и т.д.):\n\n"
+            "Можно добавить кнопки в конце:\n\n"
+            "<code>BUTTONS:\nКнопка | https://example.com</code>",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
         )
     elif data == "admin_create_link":
         context.user_data["create_link_mode"] = True
         keyboard = [[InlineKeyboardButton("✖️ Отменить", callback_data="cancel_link")]]
         await query.edit_message_text(
-            "📤 Отправьте сообщение (текст, фото, видео и т.д.), из которого нужно создать ссылку:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            "📤 Отправьте сообщение (текст, фото, видео и т.д.), из которого нужно создать ссылку:\n\n"
+            "Формат с паролем: <code>#[пароль] текст</code>",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
         )
     elif data == "admin_back":
         keyboard = [
@@ -579,7 +548,7 @@ async def setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_USER_IDS:
         return
     if len(context.args) < 2:
-        await update.message.reply_text("❌ Используйте: /setup <chat_id> <ссылка> [время/лимит]\nПример: /setup -100123456 https://t.me/channel  30m")
+        await update.message.reply_text("❌ Используйте: /setup <chat_id> <ссылка> [время/лимит]\nПример: /setup -100123456 https://t.me/channel 30m")
         return
     if len(active_campaigns) >= MAX_CAMPAIGNS:
         await update.message.reply_text(f"❌ Достигнут лимит: максимум {MAX_CAMPAIGNS} активных проверок.")
@@ -609,7 +578,7 @@ async def setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             status = f"до {member_limit} участников"
         await update.message.reply_text(f"✅ Проверка добавлена!\nID: {chat_id}\nСсылка: {link}\nДействует: {status}")
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {str(e)}\n\nИспользуйте: /setup <chat_id> <ссылка> [время/лимит]\nПримеры:\n/setup -100123456 https://t.me/channel  30m\n/setup -100123456 https://t.me/channel  1")
+        await update.message.reply_text(f"❌ Ошибка: {str(e)}\n\nИспользуйте: /setup <chat_id> <ссылка> [время/лимит]")
 
 # === РАССЫЛКА ===
 
@@ -627,6 +596,7 @@ async def broadcast_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not recipients:
         await update.message.reply_text("❌ Нет получателей для рассылки.")
         return
+
     if update.message.text:
         raw_text = update.message.text.strip()
         if not raw_text:
@@ -649,6 +619,7 @@ async def broadcast_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 failed += 1
                 if "Forbidden" in str(e):
                     user_ids.discard(user_id)
+
     elif update.message.photo or update.message.video or update.message.document:
         caption = update.message.caption or ""
         formatted_caption = format_text_with_code_blocks(caption)
@@ -688,6 +659,7 @@ async def broadcast_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Поддерживаются только текст, фото, видео и документы.")
         return
+
     await update.message.reply_text(
         f"✅ Рассылка завершена!\n"
         f"Доставлено: {success}\n"
