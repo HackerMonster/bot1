@@ -2,18 +2,14 @@ import logging
 import re
 import random
 import string
+import json
+import aiohttp
 from datetime import datetime, timedelta
+from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from telegram.error import BadRequest
-
-# === ИМПОРТ SUBGRAM ===
-try:
-    from utils.subgram_api import get_subgram_sponsors
-    SUBGRAM_ENABLED = True
-except ImportError:
-    logging.warning("SubGram API не найден. Убедитесь, что файл utils/subgram_api.py существует.")
-    SUBGRAM_ENABLED = False
+import sqlite3
 
 # === НАСТРОЙКИ ===
 
@@ -26,10 +22,114 @@ MAX_CAMPAIGNS = 15
 MAX_MEMBER_LIMIT = 50000
 BOT_USERNAME = "EpiLink_Bot"
 
-# Хранилища
+# === FLYER API ===
+FLYER_API_KEY = "FL-fCmzVf-QyBeLi-xYlScV-gkcahf"  # ⚠️ ЗАМЕНИТЕ НА СВОЙ КЛЮЧ
+FLYER_ENABLED = bool(FLYER_API_KEY)
 
-active_campaigns = {}
+# === ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ===
+
+DB_PATH = Path("bot.db")
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS campaigns (
+            chat_id TEXT PRIMARY KEY,
+            data TEXT NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS saved_messages (
+            code TEXT PRIMARY KEY,
+            data TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def load_from_db():
+    global user_ids, active_campaigns, saved_messages
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT user_id FROM users")
+    user_ids = {row[0] for row in cursor.fetchall()}
+
+    cursor.execute("SELECT chat_id, data FROM campaigns")
+    active_campaigns = {}
+    for chat_id, data_str in cursor.fetchall():
+        try:
+            data = json.loads(data_str)
+            if data.get('expires_at'):
+                data['expires_at'] = datetime.fromisoformat(data['expires_at'])
+            if data.get('start_time'):
+                data['start_time'] = datetime.fromisoformat(data['start_time'])
+            active_campaigns[int(chat_id)] = data
+        except Exception as e:
+            logging.error(f"Ошибка загрузки кампании {chat_id}: {e}")
+
+    cursor.execute("SELECT code, data FROM saved_messages")
+    saved_messages = {}
+    for code, data_str in cursor.fetchall():
+        try:
+            saved_messages[code] = json.loads(data_str)
+        except Exception as e:
+            logging.error(f"Ошибка загрузки сообщения {code}: {e}")
+
+    conn.close()
+
+def save_user_to_db(user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+    conn.commit()
+    conn.close()
+
+def save_campaign_to_db(chat_id: int, data: dict):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    safe_data = data.copy()
+    if safe_data.get('expires_at'):
+        safe_data['expires_at'] = safe_data['expires_at'].isoformat()
+    if safe_data.get('start_time'):
+        safe_data['start_time'] = safe_data['start_time'].isoformat()
+    cursor.execute("INSERT OR REPLACE INTO campaigns (chat_id, data) VALUES (?, ?)",
+                   (str(chat_id), json.dumps(safe_data, ensure_ascii=False)))
+    conn.commit()
+    conn.close()
+
+def delete_campaign_from_db(chat_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM campaigns WHERE chat_id = ?", (str(chat_id),))
+    conn.commit()
+    conn.close()
+
+def delete_all_campaigns_from_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM campaigns")
+    conn.commit()
+    conn.close()
+
+def save_message_to_db(code: str, data: dict):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO saved_messages (code, data) VALUES (?, ?)",
+                   (code, json.dumps(data, ensure_ascii=False)))
+    conn.commit()
+    conn.close()
+
+# === ХРАНИЛИЩА (будут загружены из БД) ===
+
 user_ids = set()
+active_campaigns = {}
 saved_messages = {}
 
 # === ФОРМАТИРОВАНИЕ ТЕКСТА ===
@@ -49,6 +149,26 @@ def format_text_with_code_blocks(text: str) -> str:
             safe_line = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             result.append(safe_line)
     return '\n'.join(result)
+
+# === FLYER API ФУНКЦИЯ ===
+
+async def check_flyer_subscription(user_id: int, language_code: str = "ru") -> dict:
+    if not FLYER_ENABLED:
+        return {"skip": True}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.flyerservice.io/check-subscription",
+                json={
+                    "key": FLYER_API_KEY,
+                    "user_id": user_id,
+                    "language_code": language_code
+                }
+            ) as resp:
+                return await resp.json()
+    except Exception as e:
+        logging.error(f"Ошибка Flyer API: {e}")
+        return {"error": str(e)}
 
 # === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 
@@ -167,6 +287,7 @@ async def cleanup_expired_campaigns(context: ContextTypes.DEFAULT_TYPE):
     for cid in to_remove:
         if cid in active_campaigns:
             del active_campaigns[cid]
+            delete_campaign_from_db(cid)
 
 def parse_message_with_buttons(text: str):
     if "\nBUTTONS:\n" not in text:
@@ -184,7 +305,7 @@ def parse_message_with_buttons(text: str):
                 buttons.append([InlineKeyboardButton(name, url=url)])
     return message_text, buttons
 
-# === НОВАЯ ФУНКЦИЯ СТАТУСА ===
+# === СТАТУС ПРОВЕРОК ===
 
 async def generate_human_readable_status(context: ContextTypes.DEFAULT_TYPE) -> str:
     if not active_campaigns:
@@ -248,9 +369,8 @@ async def generate_human_readable_status(context: ContextTypes.DEFAULT_TYPE) -> 
             status_lines.append(block)
         status = "\n\n" + "\n\n".join(status_lines) + "\n"
 
-    # Добавляем информацию о SubGram
-    subgram_info = "\nℹ️ SubGram API: " + ("включён" if SUBGRAM_ENABLED else "отключён")
-    return status + subgram_info
+    flyer_info = "\nℹ️ Flyer API: " + ("включён" if FLYER_ENABLED else "отключён")
+    return status + flyer_info
 
 # === ОБРАБОТЧИКИ ===
 
@@ -259,20 +379,16 @@ async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_id = update.effective_user.id
     user_ids.add(user_id)
+    save_user_to_db(user_id)
     await cleanup_expired_campaigns(context)
 
-    # 1. Сначала проверяем SubGram (если включён)
-    if SUBGRAM_ENABLED:
-        response = await get_subgram_sponsors(user_id=user_id, chat_id=update.effective_chat.id)
-        if response:
-            status = response.get("status")
-            if status == "warning":
-                # SubGram сам отправил сообщение — выходим
-                return
-            elif status == "error":
-                logging.warning(f"SubGram API ошибка: {response.get('message')}. Продолжаем локальную проверку.")
+    if FLYER_ENABLED:
+        response = await check_flyer_subscription(user_id=user_id, language_code=update.effective_user.language_code or "ru")
+        if response.get("skip"):
+            pass  # Пропускаем обязательную проверку
+        elif response.get("error"):
+            logging.warning(f"Flyer API ошибка: {response.get('error')}. Продолжаем локальную проверку.")
 
-    # 2. Локальная проверка
     unsubscribed = await get_unsubscribed_channels(user_id, context)
     if unsubscribed:
         buttons = []
@@ -297,7 +413,6 @@ async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 3. Выдача контента
     if context.args:
         code = context.args[0]
         if code in saved_messages:
@@ -327,6 +442,7 @@ async def show_subscription_prompt_inplace(update: Update, context: ContextTypes
         return
     user_id = update.effective_user.id
     user_ids.add(user_id)
+    save_user_to_db(user_id)
     unsubscribed = await get_unsubscribed_channels(user_id, context)
 
     if not active_campaigns or not unsubscribed:
@@ -394,17 +510,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "check_sub":
         user_id = query.from_user.id
 
-        # Проверка через SubGram
-        if SUBGRAM_ENABLED:
-            response = await get_subgram_sponsors(user_id=user_id, chat_id=query.message.chat.id)
-            if response:
-                status = response.get("status")
-                if status == "warning":
-                    return  # SubGram сам обработал
-                elif status == "error":
-                    logging.warning(f"SubGram API ошибка: {response.get('message')}. Продолжаем локальную проверку.")
+        if FLYER_ENABLED:
+            response = await check_flyer_subscription(user_id=user_id, language_code=query.from_user.language_code or "ru")
+            if response.get("skip"):
+                pass
+            elif response.get("error"):
+                logging.warning(f"Flyer API ошибка: {response.get('error')}. Продолжаем локальную проверку.")
 
-        # Локальная проверка
         unsubscribed = await get_unsubscribed_channels(user_id, context)
         if unsubscribed:
             channel_list = ""
@@ -458,6 +570,12 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔗 Создать ссылку", callback_data="admin_create_link")],
     ]
     await update.message.reply_text("🛠️ Панель управления администратора:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_USER_IDS:
+        return
+    count = len(user_ids)
+    await update.message.reply_text(f"📊 Всего пользователей в боте: {count:,}")
 
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -525,12 +643,14 @@ async def handle_deletion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "del_all":
         count = len(active_campaigns)
         active_campaigns.clear()
+        delete_all_campaigns_from_db()
         await query.edit_message_text(f"✅ Удалено {count} проверок.")
     elif data.startswith("del_"):
         try:
             chat_id = int(data.split("_", 1)[1])
             if chat_id in active_campaigns:
                 del active_campaigns[chat_id]
+                delete_campaign_from_db(chat_id)
                 await query.edit_message_text(f"✅ Проверка для {chat_id} удалена.")
             else:
                 await query.edit_message_text("⚠️ Проверка уже удалена.")
@@ -558,12 +678,14 @@ async def setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         expires_at = None
         if delta:
             expires_at = datetime.now() + delta
-        active_campaigns[chat_id] = {
+        campaign_data = {
             'link': link,
             'expires_at': expires_at,
             'member_limit': member_limit,
             'start_time': datetime.now()
         }
+        active_campaigns[chat_id] = campaign_data
+        save_campaign_to_db(chat_id, campaign_data)
         if not expires_at and not member_limit:
             status = "навсегда"
         elif expires_at:
@@ -671,32 +793,40 @@ async def create_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     length = random.randint(6, 25)
     safe_chars = string.ascii_letters + string.digits + "-"
     unique_code = ''.join(random.choices(safe_chars, k=length))
-    while unique_code.startswith(('-', '_')) or unique_code.endswith(('-', '_')):
+    while unique_code.startswith(('-', '')) or unique_code.endswith(('-', '')):
         unique_code = ''.join(random.choices(safe_chars, k=length))
     if update.message.text:
         raw_text = update.message.text
-        saved_messages[unique_code] = {
+        data = {
             'type': 'text',
             'content': format_text_with_code_blocks(raw_text)
         }
+        saved_messages[unique_code] = data
+        save_message_to_db(unique_code, data)
     elif update.message.photo:
-        saved_messages[unique_code] = {
+        data = {
             'type': 'photo',
             'content': update.message.photo[-1].file_id,
             'caption': update.message.caption or ""
         }
+        saved_messages[unique_code] = data
+        save_message_to_db(unique_code, data)
     elif update.message.video:
-        saved_messages[unique_code] = {
+        data = {
             'type': 'video',
             'content': update.message.video.file_id,
             'caption': update.message.caption or ""
         }
+        saved_messages[unique_code] = data
+        save_message_to_db(unique_code, data)
     elif update.message.document:
-        saved_messages[unique_code] = {
+        data = {
             'type': 'document',
             'content': update.message.document.file_id,
             'caption': update.message.caption or ""
         }
+        saved_messages[unique_code] = data
+        save_message_to_db(unique_code, data)
     else:
         await update.message.reply_text("❌ Поддерживаются только текст, фото, видео и документы.")
         return
@@ -711,10 +841,13 @@ async def create_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 def main():
     TOKEN = "8584027906:AAEZvDcBZw-ugYDOKT6yOurh6vSS5fljpTY"
+    init_db()
+    load_from_db()
     application = Application.builder().token(TOKEN).build()
-    application.add_handler(MessageHandler(filters.ALL, lambda u, c: user_ids.add(u.effective_user.id)), group=-1)
+    application.add_handler(MessageHandler(filters.ALL, lambda u, c: user_ids.add(u.effective_user.id) or save_user_to_db(u.effective_user.id)), group=-1)
     application.add_handler(CommandHandler("start", start_with_code))
     application.add_handler(CommandHandler("admin", admin_menu))
+    application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("setup", setup_command))
     application.add_handler(CallbackQueryHandler(button_handler, pattern="^check_sub$|^cancel_"))
     application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^admin_"))
