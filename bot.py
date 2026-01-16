@@ -7,6 +7,14 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from telegram.error import BadRequest
 
+# === ИМПОРТ SUBGRAM ===
+try:
+    from utils.subgram_api import get_subgram_sponsors
+    SUBGRAM_ENABLED = True
+except ImportError:
+    logging.warning("SubGram API не найден. Убедитесь, что файл utils/subgram_api.py существует.")
+    SUBGRAM_ENABLED = False
+
 # === НАСТРОЙКИ ===
 
 logging.basicConfig(
@@ -176,52 +184,41 @@ def parse_message_with_buttons(text: str):
                 buttons.append([InlineKeyboardButton(name, url=url)])
     return message_text, buttons
 
-# === НОВАЯ ФУНКЦИЯ СТАТУСА (обновлённый дизайн) ===
+# === НОВАЯ ФУНКЦИЯ СТАТУСА ===
 
 async def generate_human_readable_status(context: ContextTypes.DEFAULT_TYPE) -> str:
     if not active_campaigns:
-        return "❌ Нет активных проверок подписки."
-
-    status_lines = []
-    now = datetime.now()
-
-    for chat_id, data in active_campaigns.items():
-        try:
-            chat = await context.bot.get_chat(chat_id)
-            title = chat.title or chat.username or f"Канал {chat_id}"
-        except Exception as e:
-            logging.warning(f"Не удалось получить данные канала {chat_id}: {e}")
-            title = f"Канал {chat_id}"
-        link = data['link']
-
-        ended = False
-        reason = ""
-
-        if data.get('expires_at') and now >= data['expires_at']:
-            ended = True
-            reason = "время действия истекло"
-        elif data.get('member_limit'):
+        status = "❌ Нет активных локальных проверок подписки."
+    else:
+        status_lines = []
+        now = datetime.now()
+        for chat_id, data in active_campaigns.items():
             try:
-                current_count = getattr(chat, 'members_count', 0)
-                if current_count >= data['member_limit']:
-                    ended = True
-                    reason = f"достигнут лимит в {data['member_limit']:,} участников"
-            except:
-                pass
+                chat = await context.bot.get_chat(chat_id)
+                title = chat.title or chat.username or f"Канал {chat_id}"
+            except Exception as e:
+                logging.warning(f"Не удалось получить данные канала {chat_id}: {e}")
+                title = f"Канал {chat_id}"
+            link = data['link']
 
-        # Лимит участников
-        if data.get('member_limit'):
-            limit_str = f"{data['member_limit']:,}"
-        else:
-            limit_str = "∞"
+            ended = False
+            reason = ""
+            if data.get('expires_at') and now >= data['expires_at']:
+                ended = True
+                reason = "время действия истекло"
+            elif data.get('member_limit'):
+                try:
+                    current_count = getattr(chat, 'members_count', 0)
+                    if current_count >= data['member_limit']:
+                        ended = True
+                        reason = f"достигнут лимит в {data['member_limit']:,} участников"
+                except:
+                    pass
 
-        # Оставшееся время
-        if data.get('expires_at') and not ended:
-            time_left = data['expires_at'] - now
-            total_seconds = int(time_left.total_seconds())
-            if total_seconds <= 0:
-                time_str = "0с"
-            else:
+            limit_str = f"{data['member_limit']:,}" if data.get('member_limit') else "∞"
+            if data.get('expires_at') and not ended:
+                time_left = data['expires_at'] - now
+                total_seconds = int(time_left.total_seconds())
                 days = total_seconds // 86400
                 hours = (total_seconds % 86400) // 3600
                 minutes = (total_seconds % 3600) // 60
@@ -230,43 +227,30 @@ async def generate_human_readable_status(context: ContextTypes.DEFAULT_TYPE) -> 
                 if days: parts.append(f"{days}д")
                 if hours: parts.append(f"{hours}ч")
                 if minutes: parts.append(f"{minutes}м")
-                if total_seconds < 300:  # если меньше 5 минут — показываем секунды
-                    parts.append(f"{secs}с")
+                if total_seconds < 300: parts.append(f"{secs}с")
                 time_str = "".join(parts) if parts else "0с"
-        elif data.get('expires_at') and ended:
-            time_str = "0"
-        else:
-            time_str = "∞"
-
-        # Время окончания
-        if data.get('expires_at'):
-            end_time_str = data['expires_at'].strftime('%d %B %Y, %H:%M')
-        else:
-            end_time_str = "никогда"
-
-        # Текущие участники
-        try:
-            current_members = getattr(chat, 'members_count', "N/A")
-            if current_members == "N/A":
-                members_str = "~неизвестно"
+            elif data.get('expires_at') and ended:
+                time_str = "0"
             else:
-                members_str = f"{current_members:,}"
-        except:
-            members_str = "~неизвестно"
+                time_str = "∞"
 
-        block = (
-            f"📌 {title} / {link}\n"
-            f"👥 {limit_str} / ⏳ {time_str}\n"
-            f"🕒 {end_time_str}\n"
-            f"👤 {members_str}"
-        )
+            end_time_str = data['expires_at'].strftime('%d %B %Y, %H:%M') if data.get('expires_at') else "никогда"
+            members_str = f"{getattr(chat, 'members_count', '~неизвестно'):,}" if hasattr(chat, 'members_count') else "~неизвестно"
 
-        if ended:
-            block += f"\n⚠️ КАМПАНИЯ ЗАВЕРШЕНА ({reason})"
+            block = (
+                f"📌 {title} / {link}\n"
+                f"👥 {limit_str} / ⏳ {time_str}\n"
+                f"🕒 {end_time_str}\n"
+                f"👤 {members_str}"
+            )
+            if ended:
+                block += f"\n⚠️ КАМПАНИЯ ЗАВЕРШЕНА ({reason})"
+            status_lines.append(block)
+        status = "\n\n" + "\n\n".join(status_lines) + "\n"
 
-        status_lines.append(block)
-
-    return "\n\n" + "\n\n".join(status_lines) + "\n"
+    # Добавляем информацию о SubGram
+    subgram_info = "\nℹ️ SubGram API: " + ("включён" if SUBGRAM_ENABLED else "отключён")
+    return status + subgram_info
 
 # === ОБРАБОТЧИКИ ===
 
@@ -275,9 +259,20 @@ async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_id = update.effective_user.id
     user_ids.add(user_id)
-
     await cleanup_expired_campaigns(context)
 
+    # 1. Сначала проверяем SubGram (если включён)
+    if SUBGRAM_ENABLED:
+        response = await get_subgram_sponsors(user_id=user_id, chat_id=update.effective_chat.id)
+        if response:
+            status = response.get("status")
+            if status == "warning":
+                # SubGram сам отправил сообщение — выходим
+                return
+            elif status == "error":
+                logging.warning(f"SubGram API ошибка: {response.get('message')}. Продолжаем локальную проверку.")
+
+    # 2. Локальная проверка
     unsubscribed = await get_unsubscribed_channels(user_id, context)
     if unsubscribed:
         buttons = []
@@ -302,6 +297,7 @@ async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # 3. Выдача контента
     if context.args:
         code = context.args[0]
         if code in saved_messages:
@@ -343,7 +339,7 @@ async def show_subscription_prompt_inplace(update: Update, context: ContextTypes
             "• ♻️ Ежедневные обновления — всё всегда актуально\n\n"
             "❗️ Важно: \n"
             "Все скрипты публикуются только в наших Telegram-каналах. Подписывайся, чтобы не пропустить свежие читы и обновления!\n\n"
-            "• По поводу сотрудничества: @nikitos_ads\n\n"
+            "• По поводу сотрудничества: @nikitos_adsll\n\n"
             "✅ Играй с умом:\n"
             "Наслаждайся возможностями, но не нарушай правила Roblox и не забывай о безопасности!"
         )
@@ -397,8 +393,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "check_sub":
         user_id = query.from_user.id
-        unsubscribed = await get_unsubscribed_channels(user_id, context)
 
+        # Проверка через SubGram
+        if SUBGRAM_ENABLED:
+            response = await get_subgram_sponsors(user_id=user_id, chat_id=query.message.chat.id)
+            if response:
+                status = response.get("status")
+                if status == "warning":
+                    return  # SubGram сам обработал
+                elif status == "error":
+                    logging.warning(f"SubGram API ошибка: {response.get('message')}. Продолжаем локальную проверку.")
+
+        # Локальная проверка
+        unsubscribed = await get_unsubscribed_channels(user_id, context)
         if unsubscribed:
             channel_list = ""
             for chat_id in unsubscribed[:5]:
@@ -441,7 +448,7 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
     if update.effective_user.id not in ADMIN_USER_IDS:
-        await update.message.reply_text("Вы не администратор ❗")
+        await update.message.reply_text("❌ Доступ запрещён.")
         return
     keyboard = [
         [InlineKeyboardButton("✅ Добавить проверку", callback_data="admin_setup")],
