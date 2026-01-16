@@ -343,7 +343,7 @@ async def show_subscription_prompt_inplace(update: Update, context: ContextTypes
             "• ♻️ Ежедневные обновления — всё всегда актуально\n\n"
             "❗️ Важно: \n"
             "Все скрипты публикуются только в наших Telegram-каналах. Подписывайся, чтобы не пропустить свежие читы и обновления!\n\n"
-            "• По поводу сотрудничества: @bossoftheworidall\n\n"
+            "• По поводу сотрудничества: @nikitos_ads\n\n"
             "✅ Играй с умом:\n"
             "Наслаждайся возможностями, но не нарушай правила Roblox и не забывай о безопасности!"
         )
@@ -441,7 +441,7 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
     if update.effective_user.id not in ADMIN_USER_IDS:
-        await update.message.reply_text("❌ Доступ запрещён.")
+        await update.message.reply_text("Вы не администратор ❗")
         return
     keyboard = [
         [InlineKeyboardButton("✅ Добавить проверку", callback_data="admin_setup")],
