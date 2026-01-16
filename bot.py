@@ -16,7 +16,7 @@ logging.basicConfig(
 ADMIN_USER_IDS = {8523456846, 5870949629}
 MAX_CAMPAIGNS = 15
 MAX_MEMBER_LIMIT = 50000
-BOT_USERNAME = "xdwpo00bot"
+BOT_USERNAME = "EpiLink_Bot"
 
 # Хранилища
 
