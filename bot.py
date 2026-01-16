@@ -3,7 +3,6 @@ import re
 import random
 import string
 import json
-import aiohttp
 from datetime import datetime, timedelta
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -21,10 +20,6 @@ ADMIN_USER_IDS = {8523456846, 5870949629}
 MAX_CAMPAIGNS = 15
 MAX_MEMBER_LIMIT = 50000
 BOT_USERNAME = "EpiLink_Bot"
-
-# === FLYER API ===
-FLYER_API_KEY = "FL-fCmzVf-QyBeLi-xYlScV-gkcahf"  # ⚠️ ЗАМЕНИТЕ НА СВОЙ КЛЮЧ
-FLYER_ENABLED = bool(FLYER_API_KEY)
 
 # === ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ===
 
@@ -149,26 +144,6 @@ def format_text_with_code_blocks(text: str) -> str:
             safe_line = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             result.append(safe_line)
     return '\n'.join(result)
-
-# === FLYER API ФУНКЦИЯ ===
-
-async def check_flyer_subscription(user_id: int, language_code: str = "ru") -> dict:
-    if not FLYER_ENABLED:
-        return {"skip": True}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.flyerservice.io/check-subscription",
-                json={
-                    "key": FLYER_API_KEY,
-                    "user_id": user_id,
-                    "language_code": language_code
-                }
-            ) as resp:
-                return await resp.json()
-    except Exception as e:
-        logging.error(f"Ошибка Flyer API: {e}")
-        return {"error": str(e)}
 
 # === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 
@@ -369,7 +344,7 @@ async def generate_human_readable_status(context: ContextTypes.DEFAULT_TYPE) -> 
             status_lines.append(block)
         status = "\n\n" + "\n\n".join(status_lines) + "\n"
 
-    flyer_info = "\nℹ️ Flyer API: " + ("включён" if FLYER_ENABLED else "отключён")
+    flyer_info = "\nℹ️ Flyer: внешняя система обязательной подписки (настроена отдельно)"
     return status + flyer_info
 
 # === ОБРАБОТЧИКИ ===
@@ -382,12 +357,11 @@ async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user_to_db(user_id)
     await cleanup_expired_campaigns(context)
 
-    if FLYER_ENABLED:
-        response = await check_flyer_subscription(user_id=user_id, language_code=update.effective_user.language_code or "ru")
-        if response.get("skip"):
-            pass  # Пропускаем обязательную проверку
-        elif response.get("error"):
-            logging.warning(f"Flyer API ошибка: {response.get('error')}. Продолжаем локальную проверку.")
+    # Проверяем, не пришёл ли пользователь с "flyer"-меткой (опционально)
+    if context.args and context.args[0].startswith("flyer_"):
+        # Пропускаем проверку — считаем, что прошёл через Flyer
+        await start(update, context)
+        return
 
     unsubscribed = await get_unsubscribed_channels(user_id, context)
     if unsubscribed:
@@ -509,14 +483,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "check_sub":
         user_id = query.from_user.id
-
-        if FLYER_ENABLED:
-            response = await check_flyer_subscription(user_id=user_id, language_code=query.from_user.language_code or "ru")
-            if response.get("skip"):
-                pass
-            elif response.get("error"):
-                logging.warning(f"Flyer API ошибка: {response.get('error')}. Продолжаем локальную проверку.")
-
         unsubscribed = await get_unsubscribed_channels(user_id, context)
         if unsubscribed:
             channel_list = ""
