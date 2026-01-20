@@ -1,1 +1,5 @@
-python-telegram-bot==20.7
+pip install python-telegram-bot==20.7
+pip install aiohttp==3.9.3
+pip install python-dotenv==1.0.0
+pip install pyyaml==6.0.1
+pip install pytz==2024.1
