@@ -28,7 +28,7 @@ BOT_USERNAME = "LinksSecret_Bot"
 ALLOWED_GROUP_ID = -1003339432604  # ID группы https://t.me/c/3339432604/2
 
 # === SUBGRAM API КОНФИГУРАЦИЯ ===
-SUBGRAM_API_KEY = os.getenv("SUBGRAM_API_KEY", "ВАШ_API_КЛЮЧ_БОТА")
+SUBGRAM_API_KEY = os.getenv("SUBGRAM_API_KEY", "1a4178a1f61e311b96874a1952787532626584bc67f4acc91b95440ecb2f70a0")
 SUBGRAM_API_URL = "https://api.subgram.org/get-sponsors"
 
 # Хранилища
@@ -1460,7 +1460,7 @@ async def handle_deletion(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     TOKEN = os.getenv("TELEGRAM_TOKEN", "8549573387:AAGJynndMV16Z_Rr0YgbnTd6nWahzkw221g")
-    SUBGRAM_API_KEY_ENV = os.getenv("SUBGRAM_API_KEY", "")
+    SUBGRAM_API_KEY_ENV = os.getenv("SUBGRAM_API_KEY", "1a4178a1f61e311b96874a1952787532626584bc67f4acc91b95440ecb2f70a0")
     
     # Обновляем API ключ SubGram из переменной окружения
     global SUBGRAM_API_KEY
