@@ -625,15 +625,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Для сотрудничества: @SecretLinkAds"""
 
-        keyboard = [
-            [InlineKeyboardButton("🔥 Получить скрипт 🚀", url="https://t.me/script_f")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        if update.callback_query:
-            await update.callback_query.message.edit_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
-        else:
-            await update.effective_message.reply_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
+    keyboard = [
+        [InlineKeyboardButton("🔥 Наш канал ", url="https://t.me/script_f")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if update.callback_query:
+        await update.callback_query.message.edit_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
+    else:
+        await update.effective_message.reply_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
 
 async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -1071,7 +1071,7 @@ async def show_subscription_prompt_inplace(update: Update, context: ContextTypes
 Для сотрудничества: @SecretLinkAds"""
 
     keyboard = [
-        [InlineKeyboardButton("🔥 Получить скрипт 🚀", url="https://t.me/script_f")]
+        [InlineKeyboardButton("🔥 Наш канал ", url="https://t.me/script_f")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     if update.callback_query:
@@ -1139,7 +1139,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Для сотрудничества: @SecretLinkAds"""
 
             keyboard = [
-                [InlineKeyboardButton("🔥 Получить скрипт 🚀", url="https://t.me/script_f")]
+                [InlineKeyboardButton("🔥 Наш канал ", url="https://t.me/script_f")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
@@ -1187,7 +1187,7 @@ async def flyer_create_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if update.effective_chat.type != "private":
         return
     if update.effective_user.id not in ADMIN_USER_IDS:
-        await update.message.reply_text("❌ Доступ запрещён.")
+        await update.message.reply_text("⛔ У вас нет доступа.")
         return
 
     if not context.args:
