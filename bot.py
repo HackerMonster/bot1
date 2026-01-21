@@ -1565,7 +1565,7 @@ def main():
 
     print(f"✅ Бот запущен...")
     print(f"📌 Работает только в группе ID: {ALLOWED_GROUP_ID}")
-    print(f"🔗 SubGram API: {'✅ Настроен' if SUBGRAM_API_KEY and SUBGRAM_API_KEY != 'f5d4e6567b52e995ebf408cb75ac22740e25c9a02a0427941386c97e8843e891' else '❌ Нужен API ключ'}")
+    print(f"🔗 SubGram API: {'✅ Настроен' if SUBGRAM_API_KEY and SUBGRAM_API_KEY != 'ВАШ_API_КЛЮЧ_БОТА' else '❌ Нужен API ключ'}")
     
     application.run_polling()
 
