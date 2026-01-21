@@ -74,164 +74,158 @@ async def get_subgram_sponsors(user_id: int, chat_id: int, **kwargs) -> dict | N
             logging.error(f"Ошибка запроса к SubGram API: {e}")
             return None
 
-async def process_subgram_check(user, chat_id: int, api_kwargs: dict = None) -> Tuple[bool, Optional[str], Optional[InlineKeyboardMarkup]]:
-    """Основная функция для обработки всех статусов от SubGram."""
-    if api_kwargs is None:
-        api_kwargs = {}
-
-    user_data = {
-        "first_name": user.first_name or "",
-        "username": user.username or "",
-        "language_code": user.language_code or "ru",
-        "is_premium": bool(user.is_premium if hasattr(user, 'is_premium') else False)
-    }
-    user_data.update(api_kwargs)
+async def check_subgram_subscriptions(user_id: int, chat_id: int, user_data: dict = None) -> Tuple[bool, Optional[List[Dict]], Optional[str]]:
+    """Проверка подписок через SubGram API."""
+    if user_data is None:
+        user_data = {}
     
-    response = await get_subgram_sponsors(user.id, chat_id, **user_data)
-
+    response = await get_subgram_sponsors(user_id, chat_id, **user_data)
+    
     if response:
         status = response.get("status")
-        if status and status == "warning":
+        if status == "warning":
             # Нужно подписаться на спонсоров
-            builder = []
-            text = "⚠️ Подпишитесь на все каналы\n\n❕ Нажмите по кнопкам ниже, затем проверьте подписку."
-            
             sponsors = response.get("additional", {}).get("sponsors", [])
+            unsubscribed_sponsors = []
             for sponsor in sponsors:
-                # Показываем только тех, на кого надо подписаться
                 if sponsor.get("available_now") and sponsor.get("status") == "unsubscribed":
-                    button_text = "➕ Подписаться"  # Всегда используем этот текст
-                    link = sponsor.get("link", "")
-                    if link:
-                        builder.append([InlineKeyboardButton(button_text, url=link)])
+                    unsubscribed_sponsors.append({
+                        'link': sponsor.get("link", ""),
+                        'button_text': sponsor.get("button_text", "➕ Подписаться")
+                    })
             
-            # Добавляем кнопку проверки подписки
-            if builder:
-                # Распределяем кнопки в 2 столбца если больше 2 подписок
-                if len(builder) > 2:
-                    # Переформатируем кнопки в 2 столбца
-                    new_builder = []
-                    for i in range(0, len(builder), 2):
-                        row = []
-                        if i < len(builder):
-                            row.append(builder[i][0])
-                        if i + 1 < len(builder):
-                            row.append(builder[i + 1][0])
-                        if row:
-                            new_builder.append(row)
-                    builder = new_builder
-                
-                builder.append([InlineKeyboardButton("✅ Проверить подписку", callback_data="check_sub")])
-                return False, text, InlineKeyboardMarkup(builder)
-            else:
-                # Если нет спонсоров для подписки, разрешаем доступ
-                return True, None, None
-        else:  # error, ok или неизвестный статус -> пускаем
-            return True, None, None
-    else:  # ошибка запроса -> пускаем
+            if unsubscribed_sponsors:
+                text = "⚠️ Подпишитесь на все каналы\n\n❕ Нажмите по кнопкам ниже, затем проверьте подписку."
+                return False, unsubscribed_sponsors, text
+        
+        # Если status == "ok" или "error" - пользователь подписан на все каналы SubGram
         return True, None, None
+    
+    # В случае ошибки API считаем, что пользователь подписан
+    return True, None, None
 
-# === ОБНОВЛЕННЫЕ ФУНКЦИИ ПРОВЕРКИ ПОДПИСОК (И SUBGRAM И АДМИНСКИЕ) ===
+# === ОБНОВЛЕННЫЕ ФУНКЦИИ ПРОВЕРКИ ПОДПИСОК ===
 
 async def check_admin_subscription(user_id: int, chat_id: int) -> bool:
     """Проверка подписки на канал администратора."""
     try:
-        # Получаем информацию о чате из active_campaigns
         if chat_id in active_campaigns:
-            data = active_campaigns[chat_id]
-            # Проверяем подписку пользователя на канал
-            try:
-                bot = Application.builder().token(os.getenv("TELEGRAM_TOKEN", "8549573387:AAGJynndMV16Z_Rr0YgbnTd6nWahzkw221g")).build().bot
-                chat_member = await bot.get_chat_member(chat_id, user_id)
-                return chat_member.status in ['member', 'administrator', 'creator']
-            except Exception as e:
-                logging.error(f"Ошибка при проверке подписки на канал {chat_id}: {e}")
-                return False
+            bot = Application.builder().token(os.getenv("TELEGRAM_TOKEN", "8549573387:AAGJynndMV16Z_Rr0YgbnTd6nWahzkw221g")).build().bot
+            chat_member = await bot.get_chat_member(chat_id, user_id)
+            return chat_member.status in ['member', 'administrator', 'creator']
     except Exception as e:
-        logging.error(f"Ошибка в check_admin_subscription: {e}")
-    return True  # Если не удалось проверить, разрешаем доступ
+        logging.error(f"Ошибка проверки подписки на канал {chat_id}: {e}")
+    return False
 
-async def check_user_subscriptions(user_id: int, chat_id: int, user_data: dict = None) -> Tuple[bool, Optional[str], Optional[InlineKeyboardMarkup]]:
-    """Двойная проверка подписок: и SubGram и администраторские."""
+async def get_admin_subscriptions_needed(user_id: int) -> List[Dict]:
+    """Получение списка администраторских каналов, на которые нужно подписаться."""
+    admin_channels_needed = []
+    
+    for campaign_id, campaign_data in active_campaigns.items():
+        if campaign_id < 0:  # Это каналы/чаты
+            try:
+                is_subscribed = await check_admin_subscription(user_id, campaign_id)
+                if not is_subscribed:
+                    admin_channels_needed.append({
+                        'link': campaign_data['link'],
+                        'button_text': '➕ Подписаться'
+                    })
+            except Exception as e:
+                logging.error(f"Ошибка проверки канала {campaign_id}: {e}")
+    
+    return admin_channels_needed
+
+async def check_all_subscriptions(user_id: int, chat_id: int, user_data: dict = None) -> Tuple[bool, Optional[str], Optional[InlineKeyboardMarkup]]:
+    """Полная проверка всех подписок: SubGram + администраторские."""
     if user_data is None:
         user_data = {}
     
-    try:
-        # Проверка администраторских каналов
-        admin_subscriptions_needed = []
-        admin_buttons = []
+    # Проверяем SubGram подписки
+    subgram_subscribed, subgram_channels, subgram_text = await check_subgram_subscriptions(user_id, chat_id, user_data)
+    
+    # Проверяем администраторские подписки
+    admin_channels_needed = await get_admin_subscriptions_needed(user_id)
+    
+    # Если есть хотя бы один канал, на который нужно подписаться
+    if not subgram_subscribed or admin_channels_needed:
+        # Собираем все каналы для подписки
+        all_channels = []
         
-        for campaign_id, campaign_data in active_campaigns.items():
-            # Пропускаем SubGram проверки
-            if campaign_id < 0:  # Это каналы/чаты
-                try:
-                    # Проверяем подписку
-                    is_subscribed = await check_admin_subscription(user_id, campaign_id)
-                    if not is_subscribed:
-                        # Добавляем кнопку для подписки
-                        admin_buttons.append([InlineKeyboardButton("➕ Подписаться", url=campaign_data['link'])])
-                except Exception as e:
-                    logging.error(f"Ошибка проверки канала {campaign_id}: {e}")
+        # Добавляем каналы SubGram
+        if subgram_channels:
+            all_channels.extend(subgram_channels)
         
-        # Проверка SubGram
-        subgram_allowed, subgram_text, subgram_markup = await process_subgram_check(
-            type('User', (), {
-                'id': user_id,
-                'first_name': user_data.get('first_name', ''),
-                'username': user_data.get('username', ''),
-                'language_code': user_data.get('language_code', 'ru'),
-                'is_premium': user_data.get('is_premium', False)
-            })(),
-            chat_id,
-            user_data
-        )
+        # Добавляем администраторские каналы
+        if admin_channels_needed:
+            all_channels.extend(admin_channels_needed)
         
-        # Объединяем результаты
-        if not subgram_allowed or admin_buttons:
-            # Создаем комбинированное сообщение
-            all_buttons = []
-            text = "⚠️ Подпишитесь на все каналы\n\n❕ Нажмите по кнопкам ниже, затем проверьте подписку."
-            
-            # Добавляем кнопки администратора
-            all_buttons.extend(admin_buttons)
-            
-            if not subgram_allowed and subgram_markup:
-                # Добавляем кнопки из SubGram
-                for row in subgram_markup.inline_keyboard:
-                    for button in row:
-                        if button.url and button.text != "✅ Проверить подписку":
-                            all_buttons.append([InlineKeyboardButton("➕ Подписаться", url=button.url)])
-            
-            # Распределяем кнопки в 2 столбца если больше 2
-            if len(all_buttons) > 2:
-                reformatted_buttons = []
-                for i in range(0, len(all_buttons), 2):
-                    row = []
-                    if i < len(all_buttons):
-                        row.append(all_buttons[i][0])
-                    if i + 1 < len(all_buttons):
-                        row.append(all_buttons[i + 1][0])
-                    if row:
-                        reformatted_buttons.append(row)
-                all_buttons = reformatted_buttons
-            
-            # Добавляем кнопку проверки
-            all_buttons.append([InlineKeyboardButton("✅ Проверить подписку", callback_data="check_sub")])
-            
-            return False, text, InlineKeyboardMarkup(all_buttons)
+        # Создаем кнопки
+        buttons = []
+        for channel in all_channels:
+            buttons.append([InlineKeyboardButton(channel['button_text'], url=channel['link'])])
         
-        return True, None, None
+        # Распределяем кнопки в 2 столбца если больше 2
+        if len(buttons) > 2:
+            reformatted_buttons = []
+            for i in range(0, len(buttons), 2):
+                row = []
+                if i < len(buttons):
+                    row.append(buttons[i][0])
+                if i + 1 < len(buttons):
+                    row.append(buttons[i + 1][0])
+                if row:
+                    reformatted_buttons.append(row)
+            buttons = reformatted_buttons
         
-    except Exception as e:
-        logging.error(f"Ошибка проверки подписок: {e}")
-        # В случае ошибки разрешаем доступ
-        return True, None, None
+        # Добавляем кнопку проверки
+        buttons.append([InlineKeyboardButton("✅ Проверить подписку", callback_data="check_sub")])
+        
+        text = "⚠️ Подпишитесь на все каналы\n\n❕ Нажмите по кнопкам ниже, затем проверьте подписку."
+        
+        return False, text, InlineKeyboardMarkup(buttons)
+    
+    # Все подписки выполнены
+    return True, None, None
 
-# === ОБНОВЛЕННОЕ ПРИВЕТСТВИЕ С ЖИРНЫМ ТЕКСТОМ ===
+# === УНИВЕРСАЛЬНЫЙ ДЕКОРАТОР ДЛЯ ПРОВЕРКИ ПОДПИСОК ===
 
+async def require_subscriptions(handler):
+    """Декоратор для проверки подписок перед выполнением любой команды."""
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        if update.effective_chat.type != "private":
+            return await handler(update, context, *args, **kwargs)
+        
+        user_id = update.effective_user.id
+        user = update.effective_user
+        user_data = {
+            'first_name': user.first_name or '',
+            'username': user.username or '',
+            'language_code': user.language_code or 'ru',
+            'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
+        }
+        
+        # Проверяем все подписки
+        is_allowed, text, reply_markup = await check_all_subscriptions(user_id, update.effective_chat.id, user_data)
+        
+        if not is_allowed:
+            # Если есть callback_query, редактируем сообщение
+            if update.callback_query:
+                await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+                await update.callback_query.answer()
+            # Если это обычное сообщение, отправляем новое
+            elif update.message:
+                await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
+            return
+        
+        # Если все подписки выполнены, вызываем оригинальный обработчик
+        return await handler(update, context, *args, **kwargs)
+    
+    return wrapper
+
+# === ОБНОВЛЕННЫЕ ОБРАБОТЧИКИ С ДЕКОРАТОРОМ ===
+
+@require_subscriptions
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return
     await cleanup_expired_campaigns(context)
     
     # Получаем имя пользователя
@@ -242,28 +236,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = f"{first_name} {last_name}"
     else:
         name = first_name
-    
-    # Проверяем подписки через SubGram и администраторские каналы
-    user_id = update.effective_user.id
-    user_ids.add(user_id)
-    
-    user_data = {
-        'first_name': user.first_name or '',
-        'username': user.username or '',
-        'language_code': user.language_code or 'ru',
-        'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
-    }
-    
-    is_allowed, text, reply_markup = await check_user_subscriptions(
-        user_id, 
-        update.effective_chat.id,
-        user_data
-    )
-    
-    if not is_allowed:
-        # Показываем сообщение с просьбой подписаться
-        await update.effective_message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
-        return
     
     # Пользователь подписан на все каналы
     welcome = f"""<b>👋 Привет, друг/подруга {name}!</b>
@@ -290,32 +262,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.effective_message.reply_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
 
+@require_subscriptions
 async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return
     user_id = update.effective_user.id
     user_ids.add(user_id)
     await cleanup_expired_campaigns(context)
-
-    # Проверяем подписки через SubGram и администраторские каналы
-    user = update.effective_user
-    user_data = {
-        'first_name': user.first_name or '',
-        'username': user.username or '',
-        'language_code': user.language_code or 'ru',
-        'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
-    }
-    
-    is_allowed, text, reply_markup = await check_user_subscriptions(
-        user_id, 
-        update.effective_chat.id,
-        user_data
-    )
-    
-    if not is_allowed:
-        # Показываем сообщение с просьбой подписаться
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
-        return
 
     # Обработка кода из ссылки
     if context.args:
@@ -356,7 +307,145 @@ async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await start(update, context)
 
-# === ВОССТАНОВЛЕННАЯ ФУНКЦИЯ setup_command ===
+@require_subscriptions
+async def send_saved_message(update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict):
+    try:
+        # ОБНОВЛЕННЫЙ заголовок с жирным текстом
+        standard_header = "<b>✅ | Спасибо за подписки!</b>\n\n"
+        bot_mention = "\n\n@LinksSecret_Bot"
+        
+        # Создаем клавиатуру с кнопкой
+        keyboard = [
+            [InlineKeyboardButton("⚡️ Больше скриптов ⚡️", url="https://t.me/script_f")]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if data['type'] == 'text':
+            full_content = standard_header + data['content'] + bot_mention
+            await update.message.reply_text(
+                full_content, 
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+                disable_web_page_preview=True
+            )
+        elif data['type'] == 'photo':
+            caption = data.get('caption', '')
+            full_caption = standard_header + caption + bot_mention
+            await update.message.reply_photo(
+                photo=data['content'], 
+                caption=full_caption, 
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+        elif data['type'] == 'video':
+            caption = data.get('caption', '')
+            full_caption = standard_header + caption + bot_mention
+            await update.message.reply_video(
+                video=data['content'], 
+                caption=full_caption, 
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+        elif data['type'] == 'document':
+            caption = data.get('caption', '')
+            full_caption = standard_header + caption + bot_mention
+            await update.message.reply_document(
+                document=data['content'], 
+                caption=full_caption, 
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+    except Exception as e:
+        logging.error(f"Ошибка отправки сохранённого сообщения: {e}")
+        await update.message.reply_text("❌ Ошибка при отправке контенту.")
+
+@require_subscriptions
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "cancel_broadcast":
+        context.user_data.pop("broadcast_mode", None)
+        await query.edit_message_text("❌ Режим рассылки отменён.")
+        return
+
+    if query.data == "cancel_link":
+        context.user_data.pop("create_link_mode", None)
+        await query.edit_message_text("❌ Создание ссылки отменено.")
+        return
+
+    if query.data == "check_sub":
+        user_id = query.from_user.id
+        user = query.from_user
+        user_data = {
+            'first_name': user.first_name or '',
+            'username': user.username or '',
+            'language_code': user.language_code or 'ru',
+            'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
+        }
+        
+        # Проверяем все подписки
+        is_allowed, text, reply_markup = await check_all_subscriptions(
+            user_id, 
+            query.message.chat.id,
+            user_data
+        )
+        
+        if not is_allowed:
+            # Показываем сообщение с просьбой подписаться
+            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
+        else:
+            # Обновленное приветствие с жирным текстом
+            first_name = user.first_name or "друг"
+            last_name = user.last_name or ""
+            if last_name:
+                name = f"{first_name} {last_name}"
+            else:
+                name = first_name
+                
+            welcome = f"""<b>👋 Привет, друг/подруга {name}!</b>
+
+<b>Добро пожаловать в Secret Link</b> — место, где ты можешь быстро и безопасно получить свой скрипт для Roblox.
+
+<b>🔹 Что тебя ждёт:</b>
+• <b>⚡️ Только лучшие скрипты</b> — без вирусов, рекламы и переходников  
+• <b>🛡 Проверены вручную</b> — гарантированная безопасность
+• <b>🔁 Постоянные обновления</b> — всё актуально и стабильно работает
+
+<b>❗️ Важно:</b>  
+Чтобы получить скрипт — просто перейди в нужный канал и нажми кнопку «Получить скрипт 🚀»
+
+Для сотрудничества: @SecretLinkAds"""
+
+            keyboard = [
+                [InlineKeyboardButton("🔥 Наш канал ", url="https://t.me/script_f")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
+
+# === АДМИНСКИЕ КОМАНДЫ (БЕЗ ПРОВЕРКИ ПОДПИСОК) ===
+
+async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+    if update.effective_user.id not in ADMIN_USER_IDS:
+        await update.message.reply_text("❌ Доступ запрещён.")
+        return
+    keyboard = [
+        [InlineKeyboardButton("✅ Добавить проверку", callback_data="admin_setup")],
+        [InlineKeyboardButton("🗑 Удалить проверку", callback_data="admin_unsetup")],
+        [InlineKeyboardButton("📋 Статус проверок", callback_data="admin_status")],
+        [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton("📨 Рассылка", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("📤 Загрузить контент", callback_data="admin_upload_menu")],
+        [InlineKeyboardButton("🔗 Создать ссылку", callback_data="admin_create_link")],
+        [InlineKeyboardButton("🔄 Импорт SubGram", callback_data="admin_import_subgram")],
+        [InlineKeyboardButton("🎨 Создать Flyer", callback_data="admin_flyer_create")],
+    ]
+    await update.message.reply_text("🛠️ Панель управления администратора:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -396,7 +485,7 @@ async def setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {str(e)}\n\nИспользуйте: /setup <chat_id> <ссылка> [время/лимит]")
 
-# === ВОССТАНОВЛЕННАЯ ФУНКЦИЯ parse_duration ===
+# === ОСТАЛЬНЫЕ ФУНКЦИИ (БЕЗ ИЗМЕНЕНИЙ) ===
 
 def parse_duration(param: str):
     param = param.strip().lower()
@@ -423,94 +512,6 @@ def parse_duration(param: str):
     else:
         raise ValueError("Недопустимая единица времени")
     return delta, None
-
-# === ОБНОВЛЕННЫЙ ОБРАБОТЧИК КНОПКИ "ПРОВЕРИТЬ ПОДПИСКУ" ===
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "cancel_broadcast":
-        context.user_data.pop("broadcast_mode", None)
-        await query.edit_message_text("❌ Режим рассылки отменён.")
-        return
-
-    if query.data == "cancel_link":
-        context.user_data.pop("create_link_mode", None)
-        await query.edit_message_text("❌ Создание ссылки отменено.")
-        return
-
-    if query.data == "check_sub":
-        user_id = query.from_user.id
-        user = query.from_user
-        user_data = {
-            'first_name': user.first_name or '',
-            'username': user.username or '',
-            'language_code': user.language_code or 'ru',
-            'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
-        }
-        
-        # Проверяем подписки через SubGram и администраторские каналы
-        is_allowed, text, reply_markup = await check_user_subscriptions(
-            user_id, 
-            query.message.chat.id,
-            user_data
-        )
-        
-        if not is_allowed:
-            # Показываем сообщение с просьбой подписаться
-            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
-        else:
-            # Обновленное приветствие с жирным текстом
-            first_name = user.first_name or "друг"
-            last_name = user.last_name or ""
-            if last_name:
-                name = f"{first_name} {last_name}"
-            else:
-                name = first_name
-                
-            welcome = f"""<b>👋 Привет, друг/подруга {name}!</b>
-
-<b>Добро пожаловать в Secret Link</b> — место, где ты можешь быстро и безопасно получить свой скрипт для Roblox.
-
-<b>🔹 Что тебя ждёт:</b>
-• <b>⚡️ Только лучшие скрипты</b> — без вирусов, рекламы и переходников  
-• <b>🛡 Проверены вручную</b> — гарантированная безопасность
-• <b>🔁 Постоянные обновления</b> — всё актуально и стабильно работает
-
-<b>❗️ Важно:</b>  
-Чтобы получить скрипт — просто перейди в нужный канал и нажми кнопку «Получить скрипт 🚀»
-
-Для сотрудничества: @SecretLinkAds"""
-
-            keyboard = [
-                [InlineKeyboardButton("🔥 Наш канал ", url="https://t.me/script_f")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
-
-# === ОСТАЛЬНЫЕ ФУНКЦИИ (БЕЗ ИЗМЕНЕНИЙ) ===
-
-async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return
-    if update.effective_user.id not in ADMIN_USER_IDS:
-        await update.message.reply_text("❌ Доступ запрещён.")
-        return
-    keyboard = [
-        [InlineKeyboardButton("✅ Добавить проверку", callback_data="admin_setup")],
-        [InlineKeyboardButton("🗑 Удалить проверку", callback_data="admin_unsetup")],
-        [InlineKeyboardButton("📋 Статус проверок", callback_data="admin_status")],
-        [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton("📨 Рассылка", callback_data="admin_broadcast")],
-        [InlineKeyboardButton("📤 Загрузить контент", callback_data="admin_upload_menu")],
-        [InlineKeyboardButton("🔗 Создать ссылку", callback_data="admin_create_link")],
-        [InlineKeyboardButton("🔄 Импорт SubGram", callback_data="admin_import_subgram")],
-        [InlineKeyboardButton("🎨 Создать Flyer", callback_data="admin_flyer_create")],
-    ]
-    await update.message.reply_text("🛠️ Панель управления администратора:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -1102,58 +1103,6 @@ async def generate_human_readable_status(context: ContextTypes.DEFAULT_TYPE) -> 
         status = "\n" + "\n\n".join(status_lines) + "\n"
     return status
 
-async def send_saved_message(update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict):
-    try:
-        # ОБНОВЛЕННЫЙ заголовок с жирным текстом
-        standard_header = "<b>✅ | Спасибо за подписки!</b>\n\n"
-        bot_mention = "\n\n@LinksSecret_Bot"
-        
-        # Создаем клавиатуру с кнопкой
-        keyboard = [
-            [InlineKeyboardButton("⚡️ Больше скриптов ⚡️", url="https://t.me/script_f")]
-        ]
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        if data['type'] == 'text':
-            full_content = standard_header + data['content'] + bot_mention
-            await update.message.reply_text(
-                full_content, 
-                parse_mode="HTML",
-                reply_markup=reply_markup,
-                disable_web_page_preview=True
-            )
-        elif data['type'] == 'photo':
-            caption = data.get('caption', '')
-            full_caption = standard_header + caption + bot_mention
-            await update.message.reply_photo(
-                photo=data['content'], 
-                caption=full_caption, 
-                parse_mode="HTML",
-                reply_markup=reply_markup
-            )
-        elif data['type'] == 'video':
-            caption = data.get('caption', '')
-            full_caption = standard_header + caption + bot_mention
-            await update.message.reply_video(
-                video=data['content'], 
-                caption=full_caption, 
-                parse_mode="HTML",
-                reply_markup=reply_markup
-            )
-        elif data['type'] == 'document':
-            caption = data.get('caption', '')
-            full_caption = standard_header + caption + bot_mention
-            await update.message.reply_document(
-                document=data['content'], 
-                caption=full_caption, 
-                parse_mode="HTML",
-                reply_markup=reply_markup
-            )
-    except Exception as e:
-        logging.error(f"Ошибка отправки сохранённого сообщения: {e}")
-        await update.message.reply_text("❌ Ошибка при отправке контента.")
-
 async def show_subscription_prompt_inplace(update: Update, context: ContextTypes.DEFAULT_TYPE, message_text: str = None):
     if update.effective_chat.type != "private":
         return
@@ -1169,7 +1118,7 @@ async def show_subscription_prompt_inplace(update: Update, context: ContextTypes
         'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
     }
     
-    is_allowed, text, reply_markup = await check_user_subscriptions(
+    is_allowed, text, reply_markup = await check_all_subscriptions(
         user_id, 
         update.effective_chat.id,
         user_data
@@ -1340,6 +1289,7 @@ async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
+@require_subscriptions
 async def create_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -1540,7 +1490,7 @@ def main():
     # Трекинг всех пользователей
     application.add_handler(MessageHandler(filters.ALL, track_user), group=-1)
 
-    # Основные команды
+    # Основные команды с проверкой подписок
     application.add_handler(CommandHandler("start", start_with_code))
     application.add_handler(CommandHandler("admin", admin_menu))
     application.add_handler(CommandHandler("setup", setup_command))
