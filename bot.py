@@ -73,7 +73,7 @@ async def get_subgram_sponsors(user_id: int, chat_id: int, **kwargs) -> dict | N
             logging.error(f"Ошибка запроса к SubGram API: {e}")
             return None
 
-async def process_subgram_check(user, chat_id: int, api_kwargs: dict = None, pending_code: str = None) -> Tuple[bool, Optional[str], Optional[InlineKeyboardMarkup]]:
+async def process_subgram_check(user, chat_id: int, api_kwargs: dict = None) -> Tuple[bool, Optional[str], Optional[InlineKeyboardMarkup]]:
     """Основная функция для обработки всех статусов от SubGram."""
     if api_kwargs is None:
         api_kwargs = {}
@@ -106,9 +106,7 @@ async def process_subgram_check(user, chat_id: int, api_kwargs: dict = None, pen
             
             # Добавляем кнопку проверки подписки
             if builder:
-                # Если есть ожидающий код, добавляем его в callback_data
-                check_data = f"check_sub_{pending_code}" if pending_code else "check_sub"
-                builder.append([InlineKeyboardButton("✅ Проверить подписку", callback_data=check_data)])
+                builder.append([InlineKeyboardButton("✅ Проверить подписку", callback_data="check_sub")])
                 return False, text, InlineKeyboardMarkup(builder)
             else:
                 # Если нет спонсоров для подписки, разрешаем доступ
@@ -253,7 +251,7 @@ async def admin_upload_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
     if update.effective_user.id not in ADMIN_USER_IDS:
-        await update.message.reply_text("⛔ У вас нет доступа.")
+        await update.message.reply_text("❌ Доступ запрещён.")
         return
     
     keyboard = [
@@ -548,7 +546,7 @@ def format_text_with_code_blocks(text: str) -> str:
 
 # === ОБНОВЛЕННЫЕ ФУНКЦИИ ПРОВЕРКИ ПОДПИСОК С SUBGRAM ===
 
-async def check_user_subscriptions(user_id: int, chat_id: int, user_data: dict = None, pending_code: str = None) -> Tuple[bool, Optional[str], Optional[InlineKeyboardMarkup]]:
+async def check_user_subscriptions(user_id: int, chat_id: int, user_data: dict = None) -> Tuple[bool, Optional[str], Optional[InlineKeyboardMarkup]]:
     """Проверка подписок пользователя через SubGram API"""
     if user_data is None:
         user_data = {}
@@ -564,8 +562,7 @@ async def check_user_subscriptions(user_id: int, chat_id: int, user_data: dict =
                 'is_premium': user_data.get('is_premium', False)
             })(),
             chat_id,
-            user_data,
-            pending_code=pending_code
+            user_data
         )
         
         return is_allowed, text, reply_markup
@@ -654,33 +651,20 @@ async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
     }
     
-    # Получаем код из аргументов
-    code = context.args[0] if context.args else None
-    
     is_allowed, text, reply_markup = await check_user_subscriptions(
         user_id, 
         update.effective_chat.id,
-        user_data,
-        pending_code=code
+        user_data
     )
     
     if not is_allowed:
         # Показываем сообщение с просьбой подписаться
-        # Сохраняем код ссылки для повторной попытки
-        if code:
-            context.user_data[f"pending_code_{user_id}"] = code
-        
         await update.message.reply_text(text, reply_markup=reply_markup)
         return
 
-    # Проверяем, есть ли сохраненный код из предыдущей попытки
-    pending_code_key = f"pending_code_{user_id}"
-    if pending_code_key in context.user_data and code is None:
-        code = context.user_data[pending_code_key]
-        del context.user_data[pending_code_key]
-
     # Обработка кода из ссылки
-    if code:
+    if context.args:
+        code = context.args[0]
         if code not in saved_messages:
             await update.message.reply_text("❌ Неверная или устаревшая ссылка.")
             return
@@ -715,7 +699,6 @@ async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_saved_message(update, context, data)
             return
 
-    # Если нет кода, показываем обычное приветствие
     await start(update, context)
 
 # === ОБНОВЛЕННАЯ АДМИН-ПАНЕЛЬ ===
@@ -865,7 +848,7 @@ async def notify_campaign_ended(context: ContextTypes.DEFAULT_TYPE, chat_id: int
         f"• Участников привлечено: {current_members}\n\n"
         f"🎯 <b>Причина завершения:</b> {reason_text}\n\n"
         "💬 Спасибо всем, кто подписался!\n"
-        "Не отписывайтесь — в канале выходят самые свечие и безопасные скрипты для Roblox!\n\n"
+        "Не отписывайтесь — в канале выходят самые свежие и безопасные скрипты для Roblox!\n\n"
         "🚀 Следите за обновлениями — скоро новые акции!"
     )
     for admin_id in ADMIN_USER_IDS:
@@ -1112,8 +1095,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Создание ссылки отменено.")
         return
 
-    # Обработка проверки подписки (может быть с кодом или без)
-    if query.data.startswith("check_sub"):
+    if query.data == "check_sub":
         user_id = query.from_user.id
         user = query.from_user
         user_data = {
@@ -1123,108 +1105,44 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
         }
         
-        # Извлекаем код из callback_data если есть
-        code = None
-        if "_" in query.data and query.data != "check_sub":
-            # Формат: check_sub_ABCDEF123456
-            parts = query.data.split("_", 2)
-            if len(parts) >= 3:
-                code = parts[2]
-        
         # Проверяем подписки через SubGram
         is_allowed, text, reply_markup = await check_user_subscriptions(
             user_id, 
             query.message.chat.id,
-            user_data,
-            pending_code=code
+            user_data
         )
         
         if not is_allowed:
             # Показываем сообщение с просьбой подписаться
             await query.edit_message_text(text, reply_markup=reply_markup)
         else:
-            # Пользователь подписан
-            if code:
-                # Пытаемся показать контент по коду
-                if code in saved_messages:
-                    data = saved_messages[code]
-                    # Проверяем пароль если есть
-                    password = data.get('password')
-                    if password:
-                        # Если есть пароль, запрашиваем его
-                        user_password_attempts[user_id] = {'code': code, 'attempts': 0}
-                        await query.edit_message_text(
-                            "✅ Вы успешно подписались!\n\n"
-                            "🔐 Этот контент защищён паролем.\nВведите пароль для доступа:"
-                        )
-                    else:
-                        # Если пароля нет, сразу показываем контент
-                        await send_saved_message_from_callback(query, context, data)
-                else:
-                    # Если код не найден, показываем приветствие
-                    await show_subscription_prompt_inplace(update, context)
+            # Обновленное приветствие с жирным текстом
+            first_name = user.first_name or "друг"
+            last_name = user.last_name or ""
+            if last_name:
+                name = f"{first_name} {last_name}"
             else:
-                # Если кода нет, показываем обычное приветствие
-                await show_subscription_prompt_inplace(update, context)
+                name = first_name
+                
+            welcome = f"""<b>👋 Привет, друг/подруга {name}!</b>
 
-async def send_saved_message_from_callback(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
-    """Отправка сохраненного сообщения из callback запроса"""
-    try:
-        # ОБНОВЛЕННЫЙ заголовок с жирным текстом
-        standard_header = "<b>✅ | Спасибо за подписки!</b>\n\n"
-        bot_mention = "\n\n@LinksSecret_Bot"
-        
-        # Создаем клавиатуру с кнопкой
-        keyboard = [
-            [InlineKeyboardButton("⚡️ Больше скриптов ⚡️", url="https://t.me/script_f")]
-        ]
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        if data['type'] == 'text':
-            full_content = standard_header + data['content'] + bot_mention
-            await query.edit_message_text(
-                full_content, 
-                parse_mode="HTML",
-                reply_markup=reply_markup,
-                disable_web_page_preview=True
-            )
-        elif data['type'] == 'photo':
-            caption = data.get('caption', '')
-            full_caption = standard_header + caption + bot_mention if caption else standard_header.strip()
-            await context.bot.send_photo(
-                chat_id=query.message.chat.id,
-                photo=data['content'], 
-                caption=full_caption, 
-                parse_mode="HTML",
-                reply_markup=reply_markup
-            )
-            await query.message.delete()
-        elif data['type'] == 'video':
-            caption = data.get('caption', '')
-            full_caption = standard_header + caption + bot_mention if caption else standard_header.strip()
-            await context.bot.send_video(
-                chat_id=query.message.chat.id,
-                video=data['content'], 
-                caption=full_caption, 
-                parse_mode="HTML",
-                reply_markup=reply_markup
-            )
-            await query.message.delete()
-        elif data['type'] == 'document':
-            caption = data.get('caption', '')
-            full_caption = standard_header + caption + bot_mention if caption else standard_header.strip()
-            await context.bot.send_document(
-                chat_id=query.message.chat.id,
-                document=data['content'], 
-                caption=full_caption, 
-                parse_mode="HTML",
-                reply_markup=reply_markup
-            )
-            await query.message.delete()
-    except Exception as e:
-        logging.error(f"Ошибка отправки сохранённого сообщения из callback: {e}")
-        await query.edit_message_text("❌ Ошибка при отправке контента.")
+<b>Добро пожаловать в Secret Link</b> — место, где ты можешь быстро и безопасно получить свой скрипт для Roblox.
+
+<b>🔹 Что тебя ждёт:</b>
+• <b>⚡️ Только лучшие скрипты</b> — без вирусов, рекламы и переходников  
+• <b>🛡 Проверены вручную</b> — гарантированная безопасность
+• <b>🔁 Постоянные обновления</b> — всё актуально и стабильно работает
+
+<b>❗️ Важно:</b>  
+Чтобы получить скрипт — просто перейди в нужный канал и нажми кнопку «Получить скрипт 🚀»
+
+Для сотрудничества: @SecretLinkAds"""
+
+            keyboard = [
+                [InlineKeyboardButton("🔥 Наш канал ", url="https://t.me/script_f")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
 
 # === Flyer интеграция ===
 
@@ -1561,8 +1479,8 @@ def main():
     application.add_handler(CommandHandler("flyer_create", flyer_create_command))
     application.add_handler(CommandHandler("cancel", cancel_upload))
 
-    # Callback handlers
-    application.add_handler(CallbackQueryHandler(button_handler, pattern="^check_sub|^cancel_"))
+    # Callback handlers - УБРАЛИ "show_all_channels" и "copy_" шаблоны
+    application.add_handler(CallbackQueryHandler(button_handler, pattern="^check_sub$|^cancel_"))
     application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^admin_"))
     application.add_handler(CallbackQueryHandler(handle_deletion, pattern=r"^(del_all|del_-?\d+)$"))
     application.add_handler(CallbackQueryHandler(admin_upload_handler, pattern="^admin_upload_"))
