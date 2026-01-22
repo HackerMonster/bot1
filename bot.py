@@ -2,7 +2,7 @@ import asyncio
 import logging
 import aiohttp
 
-from aiogram import Bot, Dispatcher, Router, types, F
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
@@ -21,13 +21,14 @@ ADMIN_ID = 5870949629
 # ===============================================
 
 logging.basicConfig(level=logging.INFO)
-router = Router()
+router = Dispatcher()
+storage = MemoryStorage()
 
 # Хранилище пользователей
 USERS = set()
 
 
-# ================== FSM для рассылки ==================
+# ================== FSM ==================
 
 class BroadcastState(StatesGroup):
     content = State()
@@ -97,6 +98,8 @@ async def start_handler(message: types.Message):
 
     await send_welcome(message)
 
+
+# ================== callback SubGram ==================
 
 @router.callback_query(F.data == "subgram-op")
 async def subgram_callback(callback: types.CallbackQuery):
@@ -250,9 +253,9 @@ async def cancel(message: types.Message, state: FSMContext):
 
 async def main():
     bot = Bot(BOT_TOKEN)
-    dp = Dispatcher(storage=MemoryStorage())
+    dp = Dispatcher(bot=bot, storage=storage)
     dp.include_router(router)
-    await dp.start_polling(bot)
+    await dp.start_polling()
 
 
 if __name__ == "__main__":
