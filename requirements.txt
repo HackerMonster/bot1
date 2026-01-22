@@ -1,4 +1,4 @@
-pip install aiogram==3.1.1 
-pip install aiohttp==3.8.4
+pip install aiogram
+pip install aiohttp
 pip install python-telegram-bot
 pip install python-dotenv
