@@ -28,7 +28,7 @@ BOT_USERNAME = "LinksSecret_Bot"
 ALLOWED_GROUP_ID = -1003339432604  # ID группы https://t.me/c/3339432604/2
 
 # === SUBGRAM API КОНФИГУРАЦИЯ ===
-SUBGRAM_API_KEY = os.getenv("SUBGRAM_API_KEY", "1a4178a1f61e311b96874a1952787532626584bc67f4acc91b95440ecb2f70a0")
+SUBGRAM_API_KEY = os.getenv("SUBGRAM_API_KEY", "f5d4e6567b52e995ebf408cb75ac22740e25c9a02a0427941386c97e8843e891")
 SUBGRAM_API_URL = "https://api.subgram.org/get-sponsors"
 
 # Хранилища
@@ -44,8 +44,7 @@ FLYER_API_KEY = os.getenv("FLYER_API_KEY", None)
 
 # === SUBGRAM API ИНТЕГРАЦИЯ ===
 
-async def get_subgram_sponsors(user_id: int, chat_id: int, **kwargs) -> dict | None:
-    """Универсальная функция для запроса спонсоров из SubGram API."""
+async def get_subgram_sponsors(user_id: int, chat_id: int, **kwargs) -> dict | None:    """Универсальная функция для запроса спонсоров из SubGram API."""
     headers = {"Auth": SUBGRAM_API_KEY}
     payload = {
         "user_id": user_id,
@@ -94,8 +93,7 @@ async def process_subgram_check(user, chat_id: int, api_kwargs: dict = None) -> 
             # Нужно подписаться на спонсоров
             builder = []
             text = "❕ | Прежде чем пользоваться ботом, подпишись на указанные каналы ниже!\n\n⚠️ Подпишитесь на все каналы\n\n❕ Нажмите по кнопкам ниже, затем проверьте подписку."
-            
-            sponsors = response.get("additional", {}).get("sponsors", [])
+                        sponsors = response.get("additional", {}).get("sponsors", [])
             for sponsor in sponsors:
                 # Показываем только тех, на кого надо подписаться
                 if sponsor.get("available_now") and sponsor.get("status") == "unsubscribed":
@@ -144,8 +142,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             content_type = "text"
         elif update.message.caption:
             message_text = update.message.caption
-            if update.message.photo:
-                content_type = "photo"
+            if update.message.photo:                content_type = "photo"
             elif update.message.video:
                 content_type = "video"
             elif update.message.document:
@@ -194,8 +191,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 'password': None,
                 'created_in_group': True,
                 'group_message_id': update.message.message_id,
-                'group_chat_id': chat_id,
-                'user_id': user_id,
+                'group_chat_id': chat_id,                'user_id': user_id,
                 'timestamp': datetime.now()
             }
         elif content_type == "document":
@@ -245,7 +241,6 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
 
 # === НОВОЕ: Дополнительный способ загрузки через админку ===
-
 async def admin_upload_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Меню загрузки контента через админку"""
     if update.effective_chat.type != "private":
@@ -294,8 +289,7 @@ async def admin_upload_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode="HTML"
         )
     elif query.data == "admin_upload_video":
-        context.user_data["upload_mode"] = "video"
-        await query.edit_message_text(
+        context.user_data["upload_mode"] = "video"        await query.edit_message_text(
             "🎥 Отправьте видео для создания ссылки:\n\n"
             "В подписи можно указать пароль: <code>#[пароль] ваш текст</code>\n"
             "Можно использовать $ для кодовых блоков",
@@ -344,8 +338,7 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             if len(parts) == 1:
                 return parts[0][1:], ""
             else:
-                return parts[0][1:], parts[1]
-        return None, s
+                return parts[0][1:], parts[1]        return None, s
     
     if upload_mode == "text" and update.message.text:
         text = update.message.text
@@ -394,8 +387,7 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             saved_messages[unique_code] = {
                 'type': 'text',
                 'content': format_text_with_code_blocks(content),
-                'password': password
-            }
+                'password': password            }
         elif update.message.photo:
             caption = update.message.caption or ""
             password, caption = extract_password_and_text(caption)
@@ -444,7 +436,6 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"Тип: {saved_messages[unique_code]['type']}",
         parse_mode="HTML"
     )
-
 async def cancel_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отмена режима загрузки"""
     if update.effective_chat.type != "private":
@@ -495,7 +486,6 @@ async def setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Проверка добавлена!\nID: {chat_id}\nСсылка: {link}\nДействует: {status}")
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {str(e)}\n\nИспользуйте: /setup <chat_id> <ссылка> [время/лимит]")
-
 # === ВОССТАНОВЛЕННАЯ ФУНКЦИЯ parse_duration ===
 
 def parse_duration(param: str):
@@ -545,7 +535,6 @@ def format_text_with_code_blocks(text: str) -> str:
     return '\n'.join(result)
 
 # === ОБНОВЛЕННЫЕ ФУНКЦИИ ПРОВЕРКИ ПОДПИСОК С SUBGRAM ===
-
 async def check_user_subscriptions(user_id: int, chat_id: int, user_data: dict = None) -> Tuple[bool, Optional[str], Optional[InlineKeyboardMarkup]]:
     """Проверка подписок пользователя через SubGram API"""
     if user_data is None:
@@ -594,8 +583,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_data = {
         'first_name': user.first_name or '',
-        'username': user.username or '',
-        'language_code': user.language_code or 'ru',
+        'username': user.username or '',        'language_code': user.language_code or 'ru',
         'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
     }
     
@@ -644,8 +632,7 @@ async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Проверяем подписки через SubGram
     user = update.effective_user
-    user_data = {
-        'first_name': user.first_name or '',
+    user_data = {        'first_name': user.first_name or '',
         'username': user.username or '',
         'language_code': user.language_code or 'ru',
         'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
@@ -694,8 +681,7 @@ async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 user_password_attempts[user_id] = {'code': code, 'attempts': 0}
                 await update.message.reply_text("🔐 Этот контент защищён паролем.\nВведите пароль:")
-                return
-        else:
+                return        else:
             await send_saved_message(update, context, data)
             return
 
@@ -744,8 +730,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             parse_mode="HTML"
         )
     elif data == "admin_unsetup":
-        if not active_campaigns:
-            await query.edit_message_text("❌ Нет активных проверок.")
+        if not active_campaigns:            await query.edit_message_text("❌ Нет активных проверок.")
             return
         buttons = [
             [InlineKeyboardButton(f"Удалить {cid}", callback_data=f"del_{cid}")]
@@ -794,8 +779,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             "Формат с паролем: <code>#[пароль] текст</code>",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="HTML"
-        )
-    elif data == "admin_import_subgram":
+        )    elif data == "admin_import_subgram":
         await query.edit_message_text("SubGram уже интегрирован в проверку подписок. Настройте спонсоров в панели SubGram.")
     elif data == "admin_flyer_create":
         await query.edit_message_text("Используйте команду /flyer_create <template_id> [chat_id] чтобы создать флаер через Flyer API.")
@@ -844,8 +828,7 @@ async def notify_campaign_ended(context: ContextTypes.DEFAULT_TYPE, chat_id: int
         "📊 <b>Статистика:</b>\n"
         f"• Начало: {start_time.strftime('%d %B %Y, %H:%M')}\n"
         f"• Окончание: {end_time.strftime('%d %B %Y, %H:%M')}\n"
-        f"• Длительность: {dur_str.strip()}\n"
-        f"• Участников привлечено: {current_members}\n\n"
+        f"• Длительность: {dur_str.strip()}\n"        f"• Участников привлечено: {current_members}\n\n"
         f"🎯 <b>Причина завершения:</b> {reason_text}\n\n"
         "💬 Спасибо всем, кто подписался!\n"
         "Не отписывайтесь — в канале выходят самые свежие и безопасные скрипты для Roblox!\n\n"
@@ -894,8 +877,7 @@ def parse_message_with_buttons(text: str):
             name, url = line.split(" | ", 1)
             name = name.strip()
             url = url.strip()
-            if name and url.startswith(("http://", "https://", "tg://")):
-                buttons.append([InlineKeyboardButton(name, url=url)])
+            if name and url.startswith(("http://", "https://", "tg://")):                buttons.append([InlineKeyboardButton(name, url=url)])
     return message_text, buttons
 
 # === НОВАЯ ФУНКЦИЯ СТАТУСА ===
@@ -944,8 +926,7 @@ async def generate_human_readable_status(context: ContextTypes.DEFAULT_TYPE) -> 
                 if total_seconds < 300: parts.append(f"{secs}с")
                 time_str = "".join(parts) if parts else "0с"
             elif data.get('expires_at') and ended:
-                time_str = "0"
-            else:
+                time_str = "0"            else:
                 time_str = "∞"
 
             end_time_str = data['expires_at'].strftime('%d %B %Y, %H:%M') if data.get('expires_at') else "никогда"
@@ -994,8 +975,7 @@ async def send_saved_message(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 caption=full_caption, 
                 parse_mode="HTML",
                 reply_markup=reply_markup
-            )
-        elif data['type'] == 'video':
+            )        elif data['type'] == 'video':
             caption = data.get('caption', '')
             full_caption = standard_header + caption + bot_mention
             await update.message.reply_video(
@@ -1045,7 +1025,6 @@ async def show_subscription_prompt_inplace(update: Update, context: ContextTypes
         else:
             await update.effective_message.reply_text(text, reply_markup=reply_markup)
         return
-
     # Пользователь подписан на все каналы
     # Обновленное приветствие с жирным текстом
     user = update.effective_user
@@ -1094,7 +1073,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("create_link_mode", None)
         await query.edit_message_text("❌ Создание ссылки отменено.")
         return
-
     if query.data == "check_sub":
         user_id = query.from_user.id
         user = query.from_user
@@ -1145,7 +1123,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
 
 # === Flyer интеграция ===
-
 async def create_flyer_via_api(template_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     headers = {"Content-Type": "application/json"}
     if FLYER_API_KEY:
@@ -1194,8 +1171,7 @@ async def flyer_create_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("❌ Использование: /flyer_create <template_id> [chat_id]")
         return
 
-    template_id = context.args[0]
-    target_chat = None
+    template_id = context.args[0]    target_chat = None
     if len(context.args) > 1:
         try:
             target_chat = int(context.args[1])
@@ -1245,7 +1221,6 @@ async def flyer_create_command(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         except Exception as e:
             await update.message.reply_text(f"⚠️ Не удалось отправить по URL (попробуем другие варианты): {e}")
-
     if base64_data:
         try:
             if "," in base64_data and base64_data.startswith("data:"):
@@ -1294,8 +1269,7 @@ async def create_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     def extract_password_and_text(s: str):
         s = s.strip()
         if s.startswith("#"):
-            parts = s.split(None, 1)
-            if len(parts) == 1:
+            parts = s.split(None, 1)            if len(parts) == 1:
                 return parts[0][1:], ""
             else:
                 return parts[0][1:], parts[1]
@@ -1344,8 +1318,7 @@ async def create_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Поддерживаются только текст, фото, видео и документы.")
         return
 
-    link = f"https://t.me/{BOT_USERNAME}?start={unique_code}"
-    await update.message.reply_text(
+    link = f"https://t.me/{BOT_USERNAME}?start={unique_code}"    await update.message.reply_text(
         f"✅ Уникальная ссылка создана!\n\n"
         f"🔗 <code>{link}</code>",
         parse_mode="HTML"
@@ -1394,8 +1367,7 @@ async def broadcast_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         formatted_caption = format_text_with_code_blocks(caption)
         message_text, buttons = parse_message_with_buttons(formatted_caption)
         reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
-        for user_id in recipients:
-            try:
+        for user_id in recipients:            try:
                 if update.message.photo:
                     await context.bot.send_photo(
                         chat_id=user_id,
@@ -1444,8 +1416,7 @@ async def handle_deletion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "del_all":
         count = len(active_campaigns)
         active_campaigns.clear()
-        await query.edit_message_text(f"✅ Удалено {count} проверок.")
-    elif data.startswith("del_"):
+        await query.edit_message_text(f"✅ Удалено {count} проверок.")    elif data.startswith("del_"):
         try:
             chat_id = int(data.split("_", 1)[1])
             if chat_id in active_campaigns:
@@ -1459,8 +1430,8 @@ async def handle_deletion(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # === ЗАПУСК ===
 
 def main():
-    TOKEN = os.getenv("TELEGRAM_TOKEN", "8549573387:AAGJynndMV16Z_Rr0YgbnTd6nWahzkw221g")
-    SUBGRAM_API_KEY_ENV = os.getenv("SUBGRAM_API_KEY", "1a4178a1f61e311b96874a1952787532626584bc67f4acc91b95440ecb2f70a0")
+    TOKEN = os.getenv("TELEGRAM_TOKEN", "8549573387:AAGJynndMV16Z_Rr0YgbnTd6nWahzkw221g ")
+    SUBGRAM_API_KEY_ENV = os.getenv("SUBGRAM_API_KEY", "f5d4e6567b52e995ebf408cb75ac22740e25c9a02a0427941386c97e8843e891")
     
     # Обновляем API ключ SubGram из переменной окружения
     global SUBGRAM_API_KEY
@@ -1479,7 +1450,7 @@ def main():
     application.add_handler(CommandHandler("flyer_create", flyer_create_command))
     application.add_handler(CommandHandler("cancel", cancel_upload))
 
-    # Callback handlers - УБРАЛИ "show_all_channels" и "copy_" шаблоны
+    # Callback handlers
     application.add_handler(CallbackQueryHandler(button_handler, pattern="^check_sub$|^cancel_"))
     application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^admin_"))
     application.add_handler(CallbackQueryHandler(handle_deletion, pattern=r"^(del_all|del_-?\d+)$"))
@@ -1494,7 +1465,6 @@ def main():
     # Создание ссылок и рассылка
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL, create_link_handler), group=2)
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL, broadcast_handler), group=3)
-
     print(f"✅ Бот запущен...")
     print(f"📌 Работает только в группе ID: {ALLOWED_GROUP_ID}")
     print(f"🔗 SubGram API: {'✅ Настроен' if SUBGRAM_API_KEY and SUBGRAM_API_KEY != 'ВАШ_API_КЛЮЧ_БОТА' else '❌ Нужен API ключ'}")
