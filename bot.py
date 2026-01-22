@@ -27,6 +27,9 @@ BOT_USERNAME = "LinksSecret_Bot"
 # === КОНКРЕТНАЯ ГРУППА ДЛЯ РАБОТЫ ===
 ALLOWED_GROUP_ID = -1003339432604  # ID группы https://t.me/c/3339432604/2
 
+# === ID КАНАЛА ДЛЯ ПРОВЕРКИ SUBGRAM ===
+SUBGRAM_CHAT_ID = -1001994526641  # ID канала из ссылки https://t.me/c/1994526641
+
 # === SUBGRAM API КОНФИГУРАЦИЯ ===
 # ВАЖНО: Замените на ваш настоящий API ключ из SubGram!
 SUBGRAM_API_KEY = os.getenv("SUBGRAM_API_KEY", "f5d4e6567b52e995ebf408cb75ac22740e25c9a02a0427941386c97e8843e891")
@@ -190,7 +193,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ОБЯЗАТЕЛЬНАЯ ПРОВЕРКА ПОДПИСОК ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ
     is_allowed, text, reply_markup = await check_user_subscriptions(
         user_id, 
-        update.effective_chat.id,
+        SUBGRAM_CHAT_ID,  # ФИКСИРОВАННЫЙ ID КАНАЛА ДЛЯ ПРОВЕРКИ
         user_data
     )
     
@@ -242,7 +245,7 @@ async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ОБЯЗАТЕЛЬНАЯ ПРОВЕРКА ПОДПИСОК ПЕРЕД ДОСТУПОМ К КОНТЕНТУ
     is_allowed, text, reply_markup = await check_user_subscriptions(
         user_id, 
-        update.effective_chat.id,
+        SUBGRAM_CHAT_ID,  # ФИКСИРОВАННЫЙ ID КАНАЛА ДЛЯ ПРОВЕРКИ
         user_data
     )
     
@@ -311,7 +314,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ПРОВЕРКА ПОДПИСОК ПРИ НАЖАТИИ КНОПКИ
         is_allowed, text, reply_markup = await check_user_subscriptions(
             user_id, 
-            query.message.chat.id,
+            SUBGRAM_CHAT_ID,  # ФИКСИРОВАННЫЙ ID КАНАЛА ДЛЯ ПРОВЕРКИ
             user_data
         )
         
@@ -1046,7 +1049,7 @@ async def show_subscription_prompt_inplace(update: Update, context: ContextTypes
     
     is_allowed, text, reply_markup = await check_user_subscriptions(
         user_id, 
-        update.effective_chat.id,
+        SUBGRAM_CHAT_ID,  # ФИКСИРОВАННЫЙ ID КАНАЛА ДЛЯ ПРОВЕРКИ
         user_data
     )
     
@@ -1423,6 +1426,11 @@ def main():
         print("⚠️ ВНИМАНИЕ: Вы используете тестовый API ключ SubGram!")
         print("Замените SUBGRAM_API_KEY на ваш настоящий ключ из SubGram")
     
+    print(f"✅ Бот запущен...")
+    print(f"📌 Работает только в группе ID: {ALLOWED_GROUP_ID}")
+    print(f"🔗 SubGram проверка для канала ID: {SUBGRAM_CHAT_ID}")
+    print(f"🔑 SubGram API: {'✅ Настроен' if SUBGRAM_API_KEY and SUBGRAM_API_KEY != 'ВАШ_API_КЛЮЧ_БОТА' else '❌ Нужен API ключ'}")
+    
     application = Application.builder().token(TOKEN).build()
 
     application.add_handler(MessageHandler(filters.ALL, track_user), group=-1)
@@ -1445,10 +1453,6 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL, create_link_handler), group=2)
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL, broadcast_handler), group=3)
 
-    print(f"✅ Бот запущен...")
-    print(f"📌 Работает только в группе ID: {ALLOWED_GROUP_ID}")
-    print(f"🔗 SubGram API: {'✅ Настроен' if SUBGRAM_API_KEY and SUBGRAM_API_KEY != 'ВАШ_API_КЛЮЧ_БОТА' else '❌ Нужен API ключ'}")
-    
     application.run_polling()
 
 if __name__ == "__main__":
