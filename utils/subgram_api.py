@@ -19,51 +19,84 @@ async def get_subgram_sponsors(user_id: int, chat_id: int, **kwargs) -> dict | N
             logging.error(f"Ошибка запроса к SubGram API: {e}")
             return None
 
-# --- Файл: handlers/start.py (пример обработчика) ---
+# --- Файл: handlers/subgram.py ---
+import logging
 from aiogram import F, types, Router
-from utils.subgram_api import get_subgram_sponsors
 from aiogram.filters import CommandStart
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest
+
+from utils.subgram_api import get_subgram_sponsors
 
 router = Router()
 
-@router.message(CommandStart())
-async def handle_start_command(message: types.Message):
-    # Вызываем функцию для проверки подписки
-    response = await get_subgram_sponsors(
-        user_id=message.from_user.id,
-        chat_id=message.chat.id
-    )
+async def process_subgram_check(user: types.User, chat_id: int, api_kwargs: dict = None):
+    """Основная функция для обработки всех статусов от SubGram."""
+    if api_kwargs is None:
+        api_kwargs = {}
+
+    # Передаем больше данных о пользователе, если не передавали токен.
+    user_data = {
+        "first_name": user.first_name,
+        "username": user.username,
+        "language_code": user.language_code,
+        "is_premium": bool(user.is_premium)
+    }
+    user_data.update(api_kwargs)
+    
+    response = await get_subgram_sponsors(user_id=user.id, chat_id=chat_id, **user_data)
 
     if response:
         status = response.get("status")
-       
-        if status and status == 'warning':
-            # Сервис сам отправит сообщение с просьбой подписаться
-            return
-        if status and status == "error":
-            logging.warning(f"Ошибка SubGram API: {response.get('message')}. Предоставляем доступ.")
+        if status and status == "warning":
+            builder = InlineKeyboardBuilder()
+            text = "Пожалуйста, выполните задания ниже:"
+            sponsors = response.get("additional", {}).get("sponsors", [])
+            for sponsor in sponsors:
+                # Показываем только тех, на кого надо подписаться
+                if sponsor.get("available_now") and sponsor.get("status") == "unsubscribed":
+                    builder.button(text=sponsor.get("button_text", "Подписаться"), url=sponsor.get("link"))
+            builder.button(text="✅ Я выполнил", callback_data="subgram-op")
+            builder.adjust(1)
+            
+            # Для универсальности примера вернем данные для отправки:
+            return False, text, builder.as_markup()
+                
+        else: # error, ok или неизвестный статус -> пускаем
+            return True, None, None
+    else: # ошибка запроса -> пускаем
+        return True, None, None
 
+
+@router.message(CommandStart())
+async def handle_start_links(message: types.Message):
+    is_allowed, text, reply_markup = await process_subgram_check(message.from_user, message.chat.id)
+
+    if not is_allowed:
+        await message.answer(text, reply_markup=reply_markup)
+        return
+
+    # Даем доступ
     await message.answer("✅ Доступ предоставлен!")
-    # ... ваш код для выдачи контента ...
-
+    # ... ваш основной код ...
+    
 
 @router.callback_query(F.data == 'subgram-op')
-async def handle_subgram_callback(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    chat_id = callback.message.chat.id
-    
+async def handle_callback_links(callback: types.CallbackQuery):
+    # Удаляем старое сообщение
+    try:
+        await callback.message.delete()
+    except TelegramBadRequest:
+        logging.info("Не удалось удалить сообщение (возможно, уже удалено)")
+
     await callback.answer("⏳ Проверяем подписки...")
 
-    # Отправляем повторный запрос в SubGram API с новыми данными
-    response = await get_subgram_sponsors(user_id, chat_id)
+    is_allowed, text, reply_markup = await process_subgram_check(callback.from_user, callback.message.chat.id)
 
-    if response:
-        status = response.get("status")
-       
-        if status and status == 'warning':
-            return
-        if status and status == "error":
-            logging.warning(f"Ошибка SubGram API: {response.get('message')}. Предоставляем доступ.")
+    if not is_allowed:
+        await callback.message.answer(text, reply_markup=reply_markup)
+        return
 
+    # Даем доступ
     await callback.message.answer("✅ Доступ предоставлен!")
-    # ... ваш код для выдачи контента ...
+    # ... ваш основной код ...
