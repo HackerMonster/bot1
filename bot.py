@@ -187,6 +187,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
     }
     
+    # ОБЯЗАТЕЛЬНАЯ ПРОВЕРКА ПОДПИСОК ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ
     is_allowed, text, reply_markup = await check_user_subscriptions(
         user_id, 
         update.effective_chat.id,
@@ -197,6 +198,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(text, reply_markup=reply_markup)
         return
     
+    # Показываем приветствие только после успешной проверки
     welcome = f"""<b>👋 Привет, друг/подруга {name}!</b>
 
 <b>Добро пожаловать в Secret Link</b> — место, где ты можешь быстро и безопасно получить свой скрипт для Roblox.
@@ -237,16 +239,19 @@ async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
     }
     
+    # ОБЯЗАТЕЛЬНАЯ ПРОВЕРКА ПОДПИСОК ПЕРЕД ДОСТУПОМ К КОНТЕНТУ
     is_allowed, text, reply_markup = await check_user_subscriptions(
         user_id, 
         update.effective_chat.id,
         user_data
     )
     
+    # Если пользователь не подписан на все каналы
     if not is_allowed:
         await update.message.reply_text(text, reply_markup=reply_markup)
         return
 
+    # Только после успешной проверки подписок проверяем код
     if context.args:
         code = context.args[0]
         if code not in saved_messages:
@@ -283,6 +288,7 @@ async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_saved_message(update, context, data)
             return
 
+    # Если нет кода, показываем обычное приветствие
     await start(update, context)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -302,6 +308,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
         }
         
+        # ПРОВЕРКА ПОДПИСОК ПРИ НАЖАТИИ КНОПКИ
         is_allowed, text, reply_markup = await check_user_subscriptions(
             user_id, 
             query.message.chat.id,
@@ -470,7 +477,8 @@ def format_text_with_code_blocks(text: str) -> str:
 
 async def send_saved_message(update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict):
     try:
-        standard_header = "<b>✅ | Спасибо за подписки!</b>\n\n"
+        # Убрано стандартное приветствие о подписках, так как проверка уже выполнена
+        standard_header = ""
         bot_mention = "\n\n@LinksSecret_Bot"
         
         keyboard = [
