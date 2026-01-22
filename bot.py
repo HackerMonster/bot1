@@ -55,7 +55,7 @@ async def get_subgram_sponsors(user_id: int, chat_id: int) -> dict | None:
         return None
 
 
-# ================== Приветствие (старое) ==================
+# ================== Приветствие ==================
 
 async def send_welcome(message: types.Message):
     USERS.add(message.from_user.id)
@@ -117,6 +117,7 @@ async def admin_panel(message: types.Message):
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
             [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")]
         ]
     )
@@ -124,23 +125,45 @@ async def admin_panel(message: types.Message):
     await message.answer("👑 <b>Админ-панель</b>", reply_markup=keyboard, parse_mode="HTML")
 
 
-# ================== РАССЫЛКА ==================
-
-@router.callback_query(F.data == "admin_broadcast")
-async def start_broadcast(callback: types.CallbackQuery, state: FSMContext):
+@router.callback_query(F.data.startswith("admin_"))
+async def admin_callbacks(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Нет доступа", show_alert=True)
         return
 
-    await callback.message.answer(
-        "📢 <b>Рассылка</b>\n\n"
-        "Отправь любой контент:\n"
-        "текст / фото / видео / документ / GIF / стикер\n\n"
-        "Или /cancel для отмены",
-        parse_mode="HTML"
-    )
-    await state.set_state(BroadcastState.content)
+    if callback.data == "admin_stats":
+        total_users = len(USERS)
+        subscribed = 0
+        for user_id in USERS:
+            try:
+                resp = asyncio.run(get_subgram_sponsors(user_id, callback.message.chat.id))
+                if resp and resp.get("status") != "warning":
+                    subscribed += 1
+            except Exception:
+                pass
+
+        await callback.message.answer(
+            f"📊 <b>Статистика</b>\n\n"
+            f"Всего пользователей: {total_users}\n"
+            f"Подписавшиеся: {subscribed}\n"
+            f"Не подписаны: {total_users - subscribed}",
+            parse_mode="HTML"
+        )
+
+    elif callback.data == "admin_broadcast":
+        await callback.message.answer(
+            "📢 <b>Рассылка</b>\n\n"
+            "Отправь любой контент:\n"
+            "текст / фото / видео / документ / GIF / стикер\n\n"
+            "Или /cancel для отмены",
+            parse_mode="HTML"
+        )
+        await state.set_state(BroadcastState.content)
+
     await callback.answer()
 
+
+# ================== РАССЫЛКА ==================
 
 @router.message(BroadcastState.content)
 async def get_broadcast_content(message: types.Message, state: FSMContext):
