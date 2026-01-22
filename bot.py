@@ -5,7 +5,6 @@ import string
 import os
 import io
 import base64
-import aiohttp
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -14,13 +13,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFi
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from telegram.error import BadRequest
 
-# Импортируем функции SubGram API
-from utils.subgram_api import get_subgram_sponsors, process_subgram_response
-
 # === НАСТРОЙКИ ===
-
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    level=logging.INFO
 )
 
 ADMIN_USER_IDS = {8523456846, 5870949629}
@@ -32,20 +28,61 @@ BOT_USERNAME = "LinksSecret_Bot"
 ALLOWED_GROUP_ID = -1003339432604  # ID группы https://t.me/c/3339432604/2
 
 # === SUBGRAM API КОНФИГУРАЦИЯ ===
-# Теперь API_KEY берется из utils/subgram_api.py
+# ВАЖНО: Замените на ваш настоящий API ключ из SubGram!
+SUBGRAM_API_KEY = os.getenv("SUBGRAM_API_KEY", "f5d4e6567b52e995ebf408cb75ac22740e25c9a02a0427941386c97e8843e891")
+SUBGRAM_API_URL = "https://api.subgram.org/get-sponsors"
 
 # Хранилища
 active_campaigns = {}
 user_ids = set()
 saved_messages = {}
-user_password_attempts = {}  # user_id -> {'code': str, 'attempts': int}
+user_password_attempts = {}
 
-# === API-конфигурация (env) ===
-
+# === API-конфигурация ===
 FLYER_API_URL = os.getenv("FLYER_API_URL", "https://api.flyerservice.io")
 FLYER_API_KEY = os.getenv("FLYER_API_KEY", None)
 
-# === SUBGRAM API ИНТЕГРАЦИЯ ===
+# === ИСПРАВЛЕННЫЕ ФУНКЦИИ SUBGRAM API ===
+async def get_subgram_sponsors(user_id: int, chat_id: int, **kwargs) -> dict | None:
+    """Универсальная функция для запроса спонсоров из SubGram API."""
+    headers = {
+        "Auth": SUBGRAM_API_KEY,
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "first_name": kwargs.get("first_name", ""),
+        "username": kwargs.get("username", ""),
+        "language_code": kwargs.get("language_code", "ru"),
+        "is_premium": kwargs.get("is_premium", False),
+        "action": "subscribe"
+    }
+    
+    payload = {k: v for k, v in payload.items() if v is not None}
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(
+                SUBGRAM_API_URL, 
+                headers=headers, 
+                json=payload, 
+                timeout=10
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    logging.info(f"SubGram API response: {data}")
+                    return data
+                elif response.status == 404:
+                    return {"status": "ok", "message": "No sponsors found"}
+                else:
+                    error_text = await response.text()
+                    logging.error(f"SubGram API error {response.status}: {error_text}")
+                    return None
+        except Exception as e:
+            logging.error(f"Ошибка запроса к SubGram API: {e}")
+            return None
 
 async def process_subgram_check(user, chat_id: int, api_kwargs: dict = None) -> Tuple[bool, Optional[str], Optional[InlineKeyboardMarkup]]:
     """Основная функция для обработки всех статусов от SubGram."""
@@ -60,8 +97,42 @@ async def process_subgram_check(user, chat_id: int, api_kwargs: dict = None) -> 
     }
     user_data.update(api_kwargs)
     
-    # Используем функцию из utils/subgram_api.py
-    return await process_subgram_response(user.id, chat_id, user_data)
+    response = await get_subgram_sponsors(user.id, chat_id, **user_data)
+
+    if response:
+        status = response.get("status")
+        logging.info(f"SubGram status for user {user.id}: {status}")
+        
+        if status == "warning":
+            builder = []
+            text = "❕ | Прежде чем пользоваться ботом, подпишись на указанные каналы ниже!\n\n⚠️ Подпишитесь на все каналы\n\n❕ Нажмите по кнопкам ниже, затем проверьте подписку."
+            
+            sponsors = response.get("sponsors", [])
+            
+            if not sponsors:
+                logging.warning("No sponsors in response or sponsors list is empty")
+                return True, None, None
+            
+            for sponsor in sponsors:
+                if sponsor.get("status") in ["unsubscribed", "notgetted"]:
+                    button_text = sponsor.get("button_text", "🔺 Подписаться")
+                    link = sponsor.get("link", "")
+                    if link:
+                        builder.append([InlineKeyboardButton(button_text, url=link)])
+            
+            if builder:
+                builder.append([InlineKeyboardButton("✅ Проверить подписку", callback_data="check_sub")])
+                return False, text, InlineKeyboardMarkup(builder)
+            else:
+                return True, None, None
+        elif status == "ok":
+            return True, None, None
+        else:
+            logging.warning(f"SubGram returned status {status}: {response.get('message', 'No message')}")
+            return True, None, None
+    else:
+        logging.error("Failed to get response from SubGram API")
+        return True, None, None
 
 async def check_user_subscriptions(user_id: int, chat_id: int, user_data: dict = None) -> Tuple[bool, Optional[str], Optional[InlineKeyboardMarkup]]:
     """Проверка подписок пользователя через SubGram API"""
@@ -69,15 +140,18 @@ async def check_user_subscriptions(user_id: int, chat_id: int, user_data: dict =
         user_data = {}
     
     try:
-        # Используем SubGram API для проверки
+        class MockUser:
+            def __init__(self, user_id, user_data):
+                self.id = user_id
+                self.first_name = user_data.get('first_name', '')
+                self.username = user_data.get('username', '')
+                self.language_code = user_data.get('language_code', 'ru')
+                self.is_premium = user_data.get('is_premium', False)
+        
+        mock_user = MockUser(user_id, user_data)
+        
         is_allowed, text, reply_markup = await process_subgram_check(
-            type('User', (), {
-                'id': user_id,
-                'first_name': user_data.get('first_name', ''),
-                'username': user_data.get('username', ''),
-                'language_code': user_data.get('language_code', 'ru'),
-                'is_premium': user_data.get('is_premium', False)
-            })(),
+            mock_user,
             chat_id,
             user_data
         )
@@ -85,22 +159,192 @@ async def check_user_subscriptions(user_id: int, chat_id: int, user_data: dict =
         return is_allowed, text, reply_markup
         
     except Exception as e:
-        logging.error(f"Ошибка проверки подписок: {e}")
-        # В случае ошибки разрешаем доступ
+        logging.error(f"Ошибка проверки подписок через SubGram: {e}")
         return True, None, None
 
-# === ОБНОВЛЕННАЯ: Обработка сообщений из КОНКРЕТНОЙ группы ===
+# === ОСНОВНЫЕ КОМАНДЫ ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+    
+    await cleanup_expired_campaigns(context)
+    
+    user = update.effective_user
+    first_name = user.first_name or "друг"
+    last_name = user.last_name or ""
+    if last_name:
+        name = f"{first_name} {last_name}"
+    else:
+        name = first_name
+    
+    user_id = update.effective_user.id
+    user_ids.add(user_id)
+    
+    user_data = {
+        'first_name': user.first_name or '',
+        'username': user.username or '',
+        'language_code': user.language_code or 'ru',
+        'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
+    }
+    
+    is_allowed, text, reply_markup = await check_user_subscriptions(
+        user_id, 
+        update.effective_chat.id,
+        user_data
+    )
+    
+    if not is_allowed:
+        await update.effective_message.reply_text(text, reply_markup=reply_markup)
+        return
+    
+    welcome = f"""<b>👋 Привет, друг/подруга {name}!</b>
+
+<b>Добро пожаловать в Secret Link</b> — место, где ты можешь быстро и безопасно получить свой скрипт для Roblox.
+
+<b>🔹 Что тебя ждёт:</b>
+• <b>⚡️ Только лучшие скрипты</b> — без вирусов, рекламы и переходников  
+• <b>🛡 Проверены вручную</b> — гарантированная безопасность
+• <b>🔁 Постоянные обновления</b> — всё актуально и стабильно работает
+
+<b>❗️ Важно:</b>  
+Чтобы получить скрипт — просто перейди в нужный канал и нажми кнопку «Получить скрипт 🚀»
+
+Для сотрудничества: @SecretLinkAds"""
+
+    keyboard = [
+        [InlineKeyboardButton("🔥 Наш канал ", url="https://t.me/script_f")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if update.callback_query:
+        await update.callback_query.message.edit_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
+    else:
+        await update.effective_message.reply_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
+
+async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+    
+    user_id = update.effective_user.id
+    user_ids.add(user_id)
+    await cleanup_expired_campaigns(context)
+
+    user = update.effective_user
+    user_data = {
+        'first_name': user.first_name or '',
+        'username': user.username or '',
+        'language_code': user.language_code or 'ru',
+        'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
+    }
+    
+    is_allowed, text, reply_markup = await check_user_subscriptions(
+        user_id, 
+        update.effective_chat.id,
+        user_data
+    )
+    
+    if not is_allowed:
+        await update.message.reply_text(text, reply_markup=reply_markup)
+        return
+
+    if context.args:
+        code = context.args[0]
+        if code not in saved_messages:
+            await update.message.reply_text("❌ Неверная или устаревшая ссылка.")
+            return
+
+        data = saved_messages[code]
+        password = data.get('password')
+
+        if password:
+            if user_id in user_password_attempts and user_password_attempts[user_id]['code'] == code:
+                entered = update.message.text.strip()
+                attempts = user_password_attempts[user_id].get('attempts', 0)
+                if entered == password:
+                    del user_password_attempts[user_id]
+                    await send_saved_message(update, context, data)
+                    return
+                else:
+                    attempts += 1
+                    if attempts >= 3:
+                        del user_password_attempts[user_id]
+                        await update.message.reply_text("🔒 Превышено количество попыток. Доступ закрыт.")
+                        return
+                    user_password_attempts[user_id] = {'code': code, 'attempts': attempts}
+                    await update.message.reply_text(
+                        f"❌ Неверный пароль. Попытка {attempts}/3.\nВведите пароль для доступа к контенту:"
+                    )
+                    return
+            else:
+                user_password_attempts[user_id] = {'code': code, 'attempts': 0}
+                await update.message.reply_text("🔐 Этот контент защищён паролем.\nВведите пароль:")
+                return
+        else:
+            await send_saved_message(update, context, data)
+            return
+
+    await start(update, context)
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+    
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "check_sub":
+        user_id = query.from_user.id
+        user = query.from_user
+        user_data = {
+            'first_name': user.first_name or '',
+            'username': user.username or '',
+            'language_code': user.language_code or 'ru',
+            'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
+        }
+        
+        is_allowed, text, reply_markup = await check_user_subscriptions(
+            user_id, 
+            query.message.chat.id,
+            user_data
+        )
+        
+        if not is_allowed:
+            await query.edit_message_text(text, reply_markup=reply_markup)
+        else:
+            first_name = user.first_name or "друг"
+            last_name = user.last_name or ""
+            if last_name:
+                name = f"{first_name} {last_name}"
+            else:
+                name = first_name
+                
+            welcome = f"""<b>👋 Привет, друг/подруга {name}!</b>
+
+<b>Добро пожаловать в Secret Link</b> — место, где ты можешь быстро и безопасно получить свой скрипт для Roblox.
+
+<b>🔹 Что тебя ждёт:</b>
+• <b>⚡️ Только лучшие скрипты</b> — без вирусов, рекламы и переходников  
+• <b>🛡 Проверены вручную</b> — гарантированная безопасность
+• <b>🔁 Постоянные обновления</b> — всё актуально и стабильно работает
+
+<b>❗️ Важно:</b>  
+Чтобы получить скрипт — просто перейди в нужный канал и нажми кнопку «Получить скрипт 🚀»
+
+Для сотрудничества: @SecretLinkAds"""
+
+            keyboard = [
+                [InlineKeyboardButton("🔥 Наш канал ", url="https://t.me/script_f")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
 
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка сообщений только из конкретной группы"""
     if not update.message:
         return
     
-    # Проверяем, что сообщение из РАЗРЕШЕННОЙ группы
     if update.effective_chat.id != ALLOWED_GROUP_ID:
-        return  # Игнорируем все другие группы/каналы
+        return
     
-    # Пропускаем команды бота
     if update.message.text and update.message.text.startswith('/'):
         return
     
@@ -108,7 +352,6 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id = update.effective_chat.id
     
     try:
-        # Получаем текст сообщения
         message_text = ""
         content_type = "text"
         
@@ -124,18 +367,14 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             elif update.message.document:
                 content_type = "document"
         else:
-            # Если нет текста и нет подписи
             return
         
-        # Форматируем текст с кодом
         formatted_text = format_text_with_code_blocks(message_text)
         
-        # Генерируем уникальную ссылку для этого сообщения
         length = random.randint(6, 25)
         safe_chars = string.ascii_letters + string.digits + "-"
         unique_code = ''.join(random.choices(safe_chars, k=length))
         
-        # Сохраняем сообщение в зависимости от типа
         if content_type == "text":
             saved_messages[unique_code] = {
                 'type': 'text',
@@ -184,10 +423,8 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 'timestamp': datetime.now()
             }
         
-        # Создаем ссылку
         link = f"https://t.me/{BOT_USERNAME}?start={unique_code}"
         
-        # Отправляем ответ в группу
         reply_text = (
             f"✅ <b>Уникальная ссылка создана!</b>\n\n"
             f"👤 Отправитель: {update.effective_user.first_name or 'Пользователь'}\n"
@@ -195,11 +432,9 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             f"<i>Нажмите на ссылку, чтобы получить доступ к контенту</i>"
         )
         
-        # УБРАЛИ кнопку "Скопировать код" - оставляем только кнопку перехода
         keyboard = [[InlineKeyboardButton("🔗 Перейти к контенту", url=link)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Отправляем ответ
         await update.message.reply_text(
             reply_text,
             parse_mode="HTML",
@@ -207,7 +442,6 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             disable_web_page_preview=True
         )
         
-        # Логируем создание ссылки
         logging.info(f"Создана ссылка из группы {chat_id} пользователем {user_id}: {unique_code}")
         
     except Exception as e:
@@ -216,288 +450,6 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("❌ Ошибка при создании ссылки. Попробуйте еще раз.")
         except:
             pass
-
-# === НОВОЕ: Дополнительный способ загрузки через админку ===
-
-async def admin_upload_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Меню загрузки контента через админку"""
-    if update.effective_chat.type != "private":
-        return
-    if update.effective_user.id not in ADMIN_USER_IDS:
-        await update.message.reply_text("❌ Доступ запрещён.")
-        return
-    
-    keyboard = [
-        [InlineKeyboardButton("📝 Создать ссылку из текста", callback_data="admin_upload_text")],
-        [InlineKeyboardButton("🖼 Создать ссылку из фото", callback_data="admin_upload_photo")],
-        [InlineKeyboardButton("🎥 Создать ссылку из видео", callback_data="admin_upload_video")],
-        [InlineKeyboardButton("📎 Создать ссылку из файла", callback_data="admin_upload_document")],
-        [InlineKeyboardButton("🔗 Прямая загрузка (как в группе)", callback_data="admin_upload_direct")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="admin_back")]
-    ]
-    
-    await update.message.reply_text(
-        "📤 **Панель загрузки контента**\n\n"
-        "Выберите тип контента для создания ссылки:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML"
-    )
-
-async def admin_upload_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик кнопок загрузки"""
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == "admin_upload_text":
-        context.user_data["upload_mode"] = "text"
-        await query.edit_message_text(
-            "📝 Отправьте текст для создания ссылки:\n\n"
-            "Формат с паролем: <code>#[пароль] ваш текст</code>\n"
-            "Можно использовать $ для кодовых блоков\n\n"
-            "<i>Пример с кодом:</i>\n"
-            "<code>$loadstring(game:HttpGet'https://raw.githubusercontent.com/...')()</code>",
-            parse_mode="HTML"
-        )
-    elif query.data == "admin_upload_photo":
-        context.user_data["upload_mode"] = "photo"
-        await query.edit_message_text(
-            "🖼 Отправьте фото для создания ссылки:\n\n"
-            "В подписи можно указать пароль: <code>#[пароль] ваш текст</code>\n"
-            "Можно использовать $ для кодовых блоков",
-            parse_mode="HTML"
-        )
-    elif query.data == "admin_upload_video":
-        context.user_data["upload_mode"] = "video"
-        await query.edit_message_text(
-            "🎥 Отправьте видео для создания ссылки:\n\n"
-            "В подписи можно указать пароль: <code>#[пароль] ваш текст</code>\n"
-            "Можно использовать $ для кодовых блоков",
-            parse_mode="HTML"
-        )
-    elif query.data == "admin_upload_document":
-        context.user_data["upload_mode"] = "document"
-        await query.edit_message_text(
-            "📎 Отправьте файл для создания ссылки:\n\n"
-            "В подписи можно указать пароль: <code>#[пароль] ваш текст</code>\n"
-            "Можно использовать $ для кодовых блоков",
-            parse_mode="HTML"
-        )
-    elif query.data == "admin_upload_direct":
-        context.user_data["upload_mode"] = "direct"
-        await query.edit_message_text(
-            "🔗 **Прямая загрузка**\n\n"
-            "Просто отправьте любое сообщение (текст, фото, видео, файл) и бот автоматически создаст ссылку.\n\n"
-            "Для выхода из режима используйте /cancel",
-            parse_mode="HTML"
-        )
-
-async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка загружаемого контента через админку"""
-    if update.effective_chat.type != "private":
-        return
-    if update.effective_user.id not in ADMIN_USER_IDS:
-        return
-    
-    upload_mode = context.user_data.get("upload_mode")
-    if not upload_mode:
-        return
-    
-    # Создаем уникальную ссылку
-    length = random.randint(6, 25)
-    safe_chars = string.ascii_letters + string.digits + "-"
-    unique_code = ''.join(random.choices(safe_chars, k=length))
-    
-    password = None
-    content = ""
-    
-    def extract_password_and_text(s: str):
-        s = s.strip()
-        if s.startswith("#"):
-            parts = s.split(None, 1)
-            if len(parts) == 1:
-                return parts[0][1:], ""
-            else:
-                return parts[0][1:], parts[1]
-        return None, s
-    
-    if upload_mode == "text" and update.message.text:
-        text = update.message.text
-        password, content = extract_password_and_text(text)
-        saved_messages[unique_code] = {
-            'type': 'text',
-            'content': format_text_with_code_blocks(content),
-            'password': password
-        }
-    
-    elif upload_mode == "photo" and update.message.photo:
-        caption = update.message.caption or ""
-        password, caption = extract_password_and_text(caption)
-        saved_messages[unique_code] = {
-            'type': 'photo',
-            'content': update.message.photo[-1].file_id,
-            'caption': caption,
-            'password': password
-        }
-    
-    elif upload_mode == "video" and update.message.video:
-        caption = update.message.caption or ""
-        password, caption = extract_password_and_text(caption)
-        saved_messages[unique_code] = {
-            'type': 'video',
-            'content': update.message.video.file_id,
-            'caption': caption,
-            'password': password
-        }
-    
-    elif upload_mode == "document" and update.message.document:
-        caption = update.message.caption or ""
-        password, caption = extract_password_and_text(caption)
-        saved_messages[unique_code] = {
-            'type': 'document',
-            'content': update.message.document.file_id,
-            'caption': caption,
-            'password': password
-        }
-    
-    elif upload_mode == "direct":
-        # Автоматически определяем тип контента
-        if update.message.text:
-            text = update.message.text
-            password, content = extract_password_and_text(text)
-            saved_messages[unique_code] = {
-                'type': 'text',
-                'content': format_text_with_code_blocks(content),
-                'password': password
-            }
-        elif update.message.photo:
-            caption = update.message.caption or ""
-            password, caption = extract_password_and_text(caption)
-            saved_messages[unique_code] = {
-                'type': 'photo',
-                'content': update.message.photo[-1].file_id,
-                'caption': caption,
-                'password': password
-            }
-        elif update.message.video:
-            caption = update.message.caption or ""
-            password, caption = extract_password_and_text(caption)
-            saved_messages[unique_code] = {
-                'type': 'video',
-                'content': update.message.video.file_id,
-                'caption': caption,
-                'password': password
-            }
-        elif update.message.document:
-            caption = update.message.caption or ""
-            password, caption = extract_password_and_text(caption)
-            saved_messages[unique_code] = {
-                'type': 'document',
-                'content': update.message.document.file_id,
-                'caption': caption,
-                'password': password
-            }
-        else:
-            await update.message.reply_text("❌ Неподдерживаемый тип контента.")
-            return
-    
-    else:
-        await update.message.reply_text("❌ Неверный тип контента для выбранного режима.")
-        return
-    
-    # Создаем ссылку
-    link = f"https://t.me/{BOT_USERNAME}?start={unique_code}"
-    
-    # Очищаем режим загрузки
-    context.user_data.pop("upload_mode", None)
-    
-    await update.message.reply_text(
-        f"✅ Контент загружен! Уникальная ссылка создана:\n\n"
-        f"🔗 <code>{link}</code>\n\n"
-        f"Пароль: {'🔒 ' + password if password else '❌ Нет'}\n"
-        f"Тип: {saved_messages[unique_code]['type']}",
-        parse_mode="HTML"
-    )
-
-async def cancel_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отмена режима загрузки"""
-    if update.effective_chat.type != "private":
-        return
-    
-    context.user_data.pop("upload_mode", None)
-    context.user_data.pop("create_link_mode", None)
-    context.user_data.pop("broadcast_mode", None)
-    
-    await update.message.reply_text("✅ Все активные режимы отменены.")
-
-# === ВОССТАНОВЛЕННАЯ ФУНКЦИЯ setup_command ===
-
-async def setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return
-    if update.effective_user.id not in ADMIN_USER_IDS:
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("❌ Используйте: /setup <chat_id> <ссылка> [время/лимит]\nПример: /setup -100123456 https://t.me/channel 30m")
-        return
-    if len(active_campaigns) >= MAX_CAMPAIGNS:
-        await update.message.reply_text(f"❌ Достигнут лимит: максимум {MAX_CAMPAIGNS} активных проверок.")
-        return
-    try:
-        chat_id = int(context.args[0])
-        link = context.args[1].strip()
-        if not link.startswith("https://t.me/"):
-            raise ValueError("Ссылка должна начинаться с https://t.me/")
-        param = context.args[2].strip() if len(context.args) > 2 else "w"
-        delta, member_limit = parse_duration(param)
-        expires_at = None
-        if delta:
-            expires_at = datetime.now() + delta
-        active_campaigns[chat_id] = {
-            'link': link,
-            'expires_at': expires_at,
-            'member_limit': member_limit,
-            'start_time': datetime.now()
-        }
-        if not expires_at and not member_limit:
-            status = "навсегда"
-        elif expires_at:
-            mins = int(delta.total_seconds() // 60)
-            status = f"до {expires_at.strftime('%Y-%m-%d %H:%M')} ({mins} мин)"
-        else:
-            status = f"до {member_limit} участников"
-        await update.message.reply_text(f"✅ Проверка добавлена!\nID: {chat_id}\nСсылка: {link}\nДействует: {status}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {str(e)}\n\nИспользуйте: /setup <chat_id> <ссылка> [время/лимит]")
-
-# === ВОССТАНОВЛЕННАЯ ФУНКЦИЯ parse_duration ===
-
-def parse_duration(param: str):
-    param = param.strip().lower()
-    if param == "w":
-        return None, None
-    if param.isdigit():
-        limit = int(param)
-        if limit > MAX_MEMBER_LIMIT:
-            raise ValueError(f"Лимит не может быть больше {MAX_MEMBER_LIMIT}")
-        return None, limit
-    match = re.match(r'^(\d+)([smhd])$', param)
-    if not match:
-        raise ValueError("Неверный формат времени. Используйте: 30s, 5m, 1h, 2d или число для лимита участников")
-    amount = int(match.group(1))
-    unit = match.group(2)
-    if unit == 's':
-        delta = timedelta(seconds=amount)
-    elif unit == 'm':
-        delta = timedelta(minutes=amount)
-    elif unit == 'h':
-        delta = timedelta(hours=amount)
-    elif unit == 'd':
-        delta = timedelta(days=amount)
-    else:
-        raise ValueError("Недопустимая единица времени")
-    return delta, None
-
-# === УЛУЧШЕННОЕ ФОРМАТИРОВАНИЕ ТЕКСТА С КОДОМ ===
 
 def format_text_with_code_blocks(text: str) -> str:
     if not text:
@@ -509,7 +461,6 @@ def format_text_with_code_blocks(text: str) -> str:
         if stripped.startswith('$'):
             code_content = stripped[1:]
             code_content = code_content.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            # Убираем лишние пробелы для лучшего копирования
             code_content = code_content.strip()
             result.append(f"<code>{code_content}</code>")
         else:
@@ -517,155 +468,131 @@ def format_text_with_code_blocks(text: str) -> str:
             result.append(safe_line)
     return '\n'.join(result)
 
-# === ОБНОВЛЕННОЕ ПРИВЕТСТВИЕ С ЖИРНЫМ ТЕКСТОМ И SUBGRAM ===
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return
-    await cleanup_expired_campaigns(context)
-    
-    # Получаем имя пользователя
-    user = update.effective_user
-    first_name = user.first_name or "друг"
-    last_name = user.last_name or ""
-    if last_name:
-        name = f"{first_name} {last_name}"
-    else:
-        name = first_name
-    
-    # Проверяем подписки через SubGram (ОБЯЗАТЕЛЬНАЯ ПРОВЕРКА)
-    user_id = update.effective_user.id
-    user_ids.add(user_id)
-    
-    user_data = {
-        'first_name': user.first_name or '',
-        'username': user.username or '',
-        'language_code': user.language_code or 'ru',
-        'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
-    }
-    
-    is_allowed, text, reply_markup = await check_user_subscriptions(
-        user_id, 
-        update.effective_chat.id,
-        user_data
-    )
-    
-    if not is_allowed:
-        # Показываем сообщение с просьбой подписаться
-        await update.effective_message.reply_text(text, reply_markup=reply_markup)
-        return
-    
-    # Пользователь подписан на все каналы
-    welcome = f"""<b>👋 Привет, друг/подруга {name}!</b>
-
-<b>Добро пожаловать в Secret Link</b> — место, где ты можешь быстро и безопасно получить свой скрипт для Roblox.
-
-<b>🔹 Что тебя ждёт:</b>
-• <b>⚡️ Только лучшие скрипты</b> — без вирусов, рекламы и переходников  
-• <b>🛡 Проверены вручную</b> — гарантированная безопасность
-• <b>🔁 Постоянные обновления</b> — всё актуально и стабильно работает
-
-<b>❗️ Важно:</b>  
-Чтобы получить скрипт — просто перейди в нужный канал и нажми кнопку «Получить скрипт 🚀»
-
-Для сотрудничества: @SecretLinkAds"""
-
-    keyboard = [
-        [InlineKeyboardButton("🔥 Наш канал ", url="https://t.me/script_f")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.callback_query:
-        await update.callback_query.message.edit_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
-    else:
-        await update.effective_message.reply_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
-
-async def start_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return
-    
-    user_id = update.effective_user.id
-    user_ids.add(user_id)
-    await cleanup_expired_campaigns(context)
-
-    # Проверяем подписки через SubGram (ОБЯЗАТЕЛЬНАЯ ПРОВЕРКА)
-    user = update.effective_user
-    user_data = {
-        'first_name': user.first_name or '',
-        'username': user.username or '',
-        'language_code': user.language_code or 'ru',
-        'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
-    }
-    
-    is_allowed, text, reply_markup = await check_user_subscriptions(
-        user_id, 
-        update.effective_chat.id,
-        user_data
-    )
-    
-    if not is_allowed:
-        # Показываем сообщение с просьбой подписаться
-        await update.message.reply_text(text, reply_markup=reply_markup)
-        return
-
-    # Обработка кода из ссылки
-    if context.args:
-        code = context.args[0]
-        if code not in saved_messages:
-            await update.message.reply_text("❌ Неверная или устаревшая ссылка.")
-            return
-
-        data = saved_messages[code]
-        password = data.get('password')
-
-        if password:
-            if user_id in user_password_attempts and user_password_attempts[user_id]['code'] == code:
-                entered = update.message.text.strip()
-                attempts = user_password_attempts[user_id].get('attempts', 0)
-                if entered == password:
-                    del user_password_attempts[user_id]
-                    # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА ПОДПИСКИ ПЕРЕД ПОКАЗОМ КОНТЕНТА
-                    is_allowed, text, reply_markup = await check_user_subscriptions(
-                        user_id, 
-                        update.effective_chat.id,
-                        user_data
-                    )
-                    if not is_allowed:
-                        await update.message.reply_text(text, reply_markup=reply_markup)
-                        return
-                    await send_saved_message(update, context, data)
-                    return
-                else:
-                    attempts += 1
-                    if attempts >= 3:
-                        del user_password_attempts[user_id]
-                        await update.message.reply_text("🔒 Превышено количество попыток. Доступ закрыт.")
-                        return
-                    user_password_attempts[user_id] = {'code': code, 'attempts': attempts}
-                    await update.message.reply_text(
-                        f"❌ Неверный пароль. Попытка {attempts}/3.\nВведите пароль для доступа к контенту:"
-                    )
-                    return
-            else:
-                user_password_attempts[user_id] = {'code': code, 'attempts': 0}
-                await update.message.reply_text("🔐 Этот контент защищён паролем.\nВведите пароль:")
-                return
-        else:
-            # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА ПОДПИСКИ ПЕРЕД ПОКАЗОМ КОНТЕНТА
-            is_allowed, text, reply_markup = await check_user_subscriptions(
-                user_id, 
-                update.effective_chat.id,
-                user_data
+async def send_saved_message(update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict):
+    try:
+        standard_header = "<b>✅ | Спасибо за подписки!</b>\n\n"
+        bot_mention = "\n\n@LinksSecret_Bot"
+        
+        keyboard = [
+            [InlineKeyboardButton("⚡️ Больше скриптов ⚡️", url="https://t.me/script_f")]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if data['type'] == 'text':
+            full_content = standard_header + data['content'] + bot_mention
+            await update.message.reply_text(
+                full_content, 
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+                disable_web_page_preview=True
             )
-            if not is_allowed:
-                await update.message.reply_text(text, reply_markup=reply_markup)
-                return
-            await send_saved_message(update, context, data)
-            return
+        elif data['type'] == 'photo':
+            caption = data.get('caption', '')
+            full_caption = standard_header + caption + bot_mention
+            await update.message.reply_photo(
+                photo=data['content'], 
+                caption=full_caption, 
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+        elif data['type'] == 'video':
+            caption = data.get('caption', '')
+            full_caption = standard_header + caption + bot_mention
+            await update.message.reply_video(
+                video=data['content'], 
+                caption=full_caption, 
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+        elif data['type'] == 'document':
+            caption = data.get('caption', '')
+            full_caption = standard_header + caption + bot_mention
+            await update.message.reply_document(
+                document=data['content'], 
+                caption=full_caption, 
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+    except Exception as e:
+        logging.error(f"Ошибка отправки сохранённого сообщения: {e}")
+        await update.message.reply_text("❌ Ошибка при отправке контента.")
 
-    await start(update, context)
+async def cleanup_expired_campaigns(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now()
+    to_remove = []
+    for chat_id, data in list(active_campaigns.items()):
+        if data.get('expires_at') and now >= data['expires_at']:
+            await notify_campaign_ended(context, chat_id, "time")
+            to_remove.append(chat_id)
+            continue
+        if data.get('member_limit'):
+            try:
+                chat = await context.bot.get_chat(chat_id)
+                if hasattr(chat, 'members_count') and chat.members_count >= data['member_limit']:
+                    await notify_campaign_ended(context, chat_id, "limit")
+                    to_remove.append(chat_id)
+            except Exception as e:
+                logging.warning(f"Не удалось проверить участников для {chat_id}: {e}")
+    for cid in to_remove:
+        if cid in active_campaigns:
+            del active_campaigns[cid]
 
-# === ОБНОВЛЕННАЯ АДМИН-ПАНЕЛЬ ===
+async def notify_campaign_ended(context: ContextTypes.DEFAULT_TYPE, chat_id: int, reason: str):
+    if chat_id not in active_campaigns:
+        return
+    data = active_campaigns[chat_id]
+    link = data['link']
+    try:
+        chat = await context.bot.get_chat(chat_id)
+        title = chat.title or chat.username or str(chat_id)
+    except:
+        title = "Неизвестный канал"
+    if reason == "limit":
+        reason_text = f"достигнут лимит в {data['member_limit']:,} участников"
+    else:
+        reason_text = "истекло время действия"
+    
+    try:
+        current_members = getattr(chat, 'members_count', "N/A")
+    except:
+        current_members = "N/A"
+    
+    start_time = data.get('start_time', datetime.now() - timedelta(hours=1))
+    end_time = datetime.now()
+    duration = end_time - start_time
+    days = duration.days
+    hours, remainder = divmod(duration.seconds, 3600)
+    minutes = remainder // 60
+    dur_str = ""
+    if days: dur_str += f"{days} дн "
+    if hours: dur_str += f"{hours} ч "
+    if minutes: dur_str += f"{minutes} мин"
+    if not dur_str: dur_str = "менее минуты"
+    
+    message = (
+        "🎉 <b>Обязательная подписка завершена!</b>\n\n"
+        f"❗ Кампания на канале <b>{title}</b> больше не активна.\n\n"
+        f"🔗 <a href=\"{link}\">Перейти в канал</a>\n\n"
+        "📊 <b>Статистика:</b>\n"
+        f"• Начало: {start_time.strftime('%d %B %Y, %H:%M')}\n"
+        f"• Окончание: {end_time.strftime('%d %B %Y, %H:%M')}\n"
+        f"• Длительность: {dur_str.strip()}\n"
+        f"• Участников привлечено: {current_members}\n\n"
+        f"🎯 <b>Причина завершения:</b> {reason_text}\n\n"
+        "💬 Спасибо всем, кто подписался!"
+    )
+    
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=message,
+                parse_mode="HTML",
+                disable_web_page_preview=False
+            )
+        except Exception as e:
+            logging.error(f"Не удалось отправить уведомление админу {admin_id}: {e}")
 
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -766,103 +693,271 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "admin_back":
         await admin_menu(update, context)
 
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
-
-async def get_unsubscribed_channels(user_id: int, context: ContextTypes.DEFAULT_TYPE):
-    # Теперь используем SubGram для проверки подписок
-    return []
-
-async def notify_campaign_ended(context: ContextTypes.DEFAULT_TYPE, chat_id: int, reason: str):
-    if chat_id not in active_campaigns:
+async def admin_upload_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
         return
-    data = active_campaigns[chat_id]
-    link = data['link']
-    try:
-        chat = await context.bot.get_chat(chat_id)
-        title = chat.title or chat.username or str(chat_id)
-    except:
-        title = "Неизвестный канал"
-    if reason == "limit":
-        reason_text = f"достигнут лимит в {data['member_limit']:,} участников"
-    else:
-        reason_text = "истекло время действия"
-    try:
-        current_members = getattr(chat, 'members_count', "N/A")
-    except:
-        current_members = "N/A"
-    start_time = data.get('start_time', datetime.now() - timedelta(hours=1))
-    end_time = datetime.now()
-    duration = end_time - start_time
-    days = duration.days
-    hours, remainder = divmod(duration.seconds, 3600)
-    minutes = remainder // 60
-    dur_str = ""
-    if days: dur_str += f"{days} дн "
-    if hours: dur_str += f"{hours} ч "
-    if minutes: dur_str += f"{minutes} мин"
-    if not dur_str: dur_str = "менее минуты"
-    message = (
-        "🎉 <b>Обязательная подписка завершена!</b>\n\n"
-        f"❗ Кампания на канале <b>{title}</b> больше не активна.\n\n"
-        f"🔗 <a href=\"{link}\">Перейти в канал</a>\n\n"
-        "📊 <b>Статистика:</b>\n"
-        f"• Начало: {start_time.strftime('%d %B %Y, %H:%M')}\n"
-        f"• Окончание: {end_time.strftime('%d %B %Y, %H:%M')}\n"
-        f"• Длительность: {dur_str.strip()}\n"
-        f"• Участников привлечено: {current_members}\n\n"
-        f"🎯 <b>Причина завершения:</b> {reason_text}\n\n"
-        "💬 Спасибо всем, кто подписался!\n"
-        "Не отписывайтесь — в канале выходят самые свежие и безопасные скрипты для Roblox!\n\n"
-        "🚀 Следите за обновлениями — скоро новые акции!"
+    if update.effective_user.id not in ADMIN_USER_IDS:
+        await update.message.reply_text("❌ Доступ запрещён.")
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("📝 Создать ссылку из текста", callback_data="admin_upload_text")],
+        [InlineKeyboardButton("🖼 Создать ссылку из фото", callback_data="admin_upload_photo")],
+        [InlineKeyboardButton("🎥 Создать ссылку из видео", callback_data="admin_upload_video")],
+        [InlineKeyboardButton("📎 Создать ссылку из файла", callback_data="admin_upload_document")],
+        [InlineKeyboardButton("🔗 Прямая загрузка (как в группе)", callback_data="admin_upload_direct")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="admin_back")]
+    ]
+    
+    await update.message.reply_text(
+        "📤 **Панель загрузки контента**\n\n"
+        "Выберите тип контента для создания ссылки:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
     )
-    for admin_id in ADMIN_USER_IDS:
-        try:
-            await context.bot.send_message(
-                chat_id=admin_id,
-                text=message,
-                parse_mode="HTML",
-                disable_web_page_preview=False
-            )
-        except Exception as e:
-            logging.error(f"Не удалось отправить уведомление админу {admin_id}: {e}")
 
-async def cleanup_expired_campaigns(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now()
-    to_remove = []
-    for chat_id, data in list(active_campaigns.items()):
-        if data.get('expires_at') and now >= data['expires_at']:
-            await notify_campaign_ended(context, chat_id, "time")
-            to_remove.append(chat_id)
-            continue
-        if data.get('member_limit'):
-            try:
-                chat = await context.bot.get_chat(chat_id)
-                if hasattr(chat, 'members_count') and chat.members_count >= data['member_limit']:
-                    await notify_campaign_ended(context, chat_id, "limit")
-                    to_remove.append(chat_id)
-            except Exception as e:
-                logging.warning(f"Не удалось проверить участников для {chat_id}: {e}")
-    for cid in to_remove:
-        if cid in active_campaigns:
-            del active_campaigns[cid]
+async def admin_upload_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "admin_upload_text":
+        context.user_data["upload_mode"] = "text"
+        await query.edit_message_text(
+            "📝 Отправьте текст для создания ссылки:\n\n"
+            "Формат с паролем: <code>#[пароль] ваш текст</code>\n"
+            "Можно использовать $ для кодовых блоков\n\n"
+            "<i>Пример с кодом:</i>\n"
+            "<code>$loadstring(game:HttpGet'https://raw.githubusercontent.com/...')()</code>",
+            parse_mode="HTML"
+        )
+    elif query.data == "admin_upload_photo":
+        context.user_data["upload_mode"] = "photo"
+        await query.edit_message_text(
+            "🖼 Отправьте фото для создания ссылки:\n\n"
+            "В подписи можно указать пароль: <code>#[пароль] ваш текст</code>\n"
+            "Можно использовать $ для кодовых блоков",
+            parse_mode="HTML"
+        )
+    elif query.data == "admin_upload_video":
+        context.user_data["upload_mode"] = "video"
+        await query.edit_message_text(
+            "🎥 Отправьте видео для создания ссылки:\n\n"
+            "В подписи можно указать пароль: <code>#[пароль] ваш текст</code>\n"
+            "Можно использовать $ для кодовых блоков",
+            parse_mode="HTML"
+        )
+    elif query.data == "admin_upload_document":
+        context.user_data["upload_mode"] = "document"
+        await query.edit_message_text(
+            "📎 Отправьте файл для создания ссылки:\n\n"
+            "В подписи можно указать пароль: <code>#[пароль] ваш текст</code>\n"
+            "Можно использовать $ для кодовых блоков",
+            parse_mode="HTML"
+        )
+    elif query.data == "admin_upload_direct":
+        context.user_data["upload_mode"] = "direct"
+        await query.edit_message_text(
+            "🔗 **Прямая загрузка**\n\n"
+            "Просто отправьте любое сообщение (текст, фото, видео, файл) и бот автоматически создаст ссылку.\n\n"
+            "Для выхода из режима используйте /cancel",
+            parse_mode="HTML"
+        )
 
-def parse_message_with_buttons(text: str):
-    if "\nBUTTONS:\n" not in text:
-        return text, []
-    parts = text.split("\nBUTTONS:\n", 1)
-    message_text = parts[0]
-    button_lines = parts[1].strip().split("\n")
-    buttons = []
-    for line in button_lines[:10]:
-        if " | " in line:
-            name, url = line.split(" | ", 1)
-            name = name.strip()
-            url = url.strip()
-            if name and url.startswith(("http://", "https://", "tg://")):
-                buttons.append([InlineKeyboardButton(name, url=url)])
-    return message_text, buttons
+async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+    if update.effective_user.id not in ADMIN_USER_IDS:
+        return
+    
+    upload_mode = context.user_data.get("upload_mode")
+    if not upload_mode:
+        return
+    
+    length = random.randint(6, 25)
+    safe_chars = string.ascii_letters + string.digits + "-"
+    unique_code = ''.join(random.choices(safe_chars, k=length))
+    
+    password = None
+    content = ""
+    
+    def extract_password_and_text(s: str):
+        s = s.strip()
+        if s.startswith("#"):
+            parts = s.split(None, 1)
+            if len(parts) == 1:
+                return parts[0][1:], ""
+            else:
+                return parts[0][1:], parts[1]
+        return None, s
+    
+    if upload_mode == "text" and update.message.text:
+        text = update.message.text
+        password, content = extract_password_and_text(text)
+        saved_messages[unique_code] = {
+            'type': 'text',
+            'content': format_text_with_code_blocks(content),
+            'password': password
+        }
+    
+    elif upload_mode == "photo" and update.message.photo:
+        caption = update.message.caption or ""
+        password, caption = extract_password_and_text(caption)
+        saved_messages[unique_code] = {
+            'type': 'photo',
+            'content': update.message.photo[-1].file_id,
+            'caption': caption,
+            'password': password
+        }
+    
+    elif upload_mode == "video" and update.message.video:
+        caption = update.message.caption or ""
+        password, caption = extract_password_and_text(caption)
+        saved_messages[unique_code] = {
+            'type': 'video',
+            'content': update.message.video.file_id,
+            'caption': caption,
+            'password': password
+        }
+    
+    elif upload_mode == "document" and update.message.document:
+        caption = update.message.caption or ""
+        password, caption = extract_password_and_text(caption)
+        saved_messages[unique_code] = {
+            'type': 'document',
+            'content': update.message.document.file_id,
+            'caption': caption,
+            'password': password
+        }
+    
+    elif upload_mode == "direct":
+        if update.message.text:
+            text = update.message.text
+            password, content = extract_password_and_text(text)
+            saved_messages[unique_code] = {
+                'type': 'text',
+                'content': format_text_with_code_blocks(content),
+                'password': password
+            }
+        elif update.message.photo:
+            caption = update.message.caption or ""
+            password, caption = extract_password_and_text(caption)
+            saved_messages[unique_code] = {
+                'type': 'photo',
+                'content': update.message.photo[-1].file_id,
+                'caption': caption,
+                'password': password
+            }
+        elif update.message.video:
+            caption = update.message.caption or ""
+            password, caption = extract_password_and_text(caption)
+            saved_messages[unique_code] = {
+                'type': 'video',
+                'content': update.message.video.file_id,
+                'caption': caption,
+                'password': password
+            }
+        elif update.message.document:
+            caption = update.message.caption or ""
+            password, caption = extract_password_and_text(caption)
+            saved_messages[unique_code] = {
+                'type': 'document',
+                'content': update.message.document.file_id,
+                'caption': caption,
+                'password': password
+            }
+        else:
+            await update.message.reply_text("❌ Неподдерживаемый тип контента.")
+            return
+    
+    else:
+        await update.message.reply_text("❌ Неверный тип контента для выбранного режима.")
+        return
+    
+    link = f"https://t.me/{BOT_USERNAME}?start={unique_code}"
+    
+    context.user_data.pop("upload_mode", None)
+    
+    await update.message.reply_text(
+        f"✅ Контент загружен! Уникальная ссылка создана:\n\n"
+        f"🔗 <code>{link}</code>\n\n"
+        f"Пароль: {'🔒 ' + password if password else '❌ Нет'}\n"
+        f"Тип: {saved_messages[unique_code]['type']}",
+        parse_mode="HTML"
+    )
 
-# === НОВАЯ ФУНКЦИЯ СТАТУСА ===
+async def cancel_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+    
+    context.user_data.pop("upload_mode", None)
+    context.user_data.pop("create_link_mode", None)
+    context.user_data.pop("broadcast_mode", None)
+    
+    await update.message.reply_text("✅ Все активные режимы отменены.")
+
+async def setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+    if update.effective_user.id not in ADMIN_USER_IDS:
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("❌ Используйте: /setup <chat_id> <ссылка> [время/лимит]\nПример: /setup -100123456 https://t.me/channel 30m")
+        return
+    if len(active_campaigns) >= MAX_CAMPAIGNS:
+        await update.message.reply_text(f"❌ Достигнут лимит: максимум {MAX_CAMPAIGNS} активных проверок.")
+        return
+    try:
+        chat_id = int(context.args[0])
+        link = context.args[1].strip()
+        if not link.startswith("https://t.me/"):
+            raise ValueError("Ссылка должна начинаться с https://t.me/")
+        param = context.args[2].strip() if len(context.args) > 2 else "w"
+        delta, member_limit = parse_duration(param)
+        expires_at = None
+        if delta:
+            expires_at = datetime.now() + delta
+        active_campaigns[chat_id] = {
+            'link': link,
+            'expires_at': expires_at,
+            'member_limit': member_limit,
+            'start_time': datetime.now()
+        }
+        if not expires_at and not member_limit:
+            status = "навсегда"
+        elif expires_at:
+            mins = int(delta.total_seconds() // 60)
+            status = f"до {expires_at.strftime('%Y-%m-%d %H:%M')} ({mins} мин)"
+        else:
+            status = f"до {member_limit} участников"
+        await update.message.reply_text(f"✅ Проверка добавлена!\nID: {chat_id}\nСсылка: {link}\nДействует: {status}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {str(e)}\n\nИспользуйте: /setup <chat_id> <ссылка> [время/лимит]")
+
+def parse_duration(param: str):
+    param = param.strip().lower()
+    if param == "w":
+        return None, None
+    if param.isdigit():
+        limit = int(param)
+        if limit > MAX_MEMBER_LIMIT:
+            raise ValueError(f"Лимит не может быть больше {MAX_MEMBER_LIMIT}")
+        return None, limit
+    match = re.match(r'^(\d+)([smhd])$', param)
+    if not match:
+        raise ValueError("Неверный формат времени. Используйте: 30s, 5m, 1h, 2d или число для лимита участников")
+    amount = int(match.group(1))
+    unit = match.group(2)
+    if unit == 's':
+        delta = timedelta(seconds=amount)
+    elif unit == 'm':
+        delta = timedelta(minutes=amount)
+    elif unit == 'h':
+        delta = timedelta(hours=amount)
+    elif unit == 'd':
+        delta = timedelta(days=amount)
+    else:
+        raise ValueError("Недопустимая единица времени")
+    return delta, None
 
 async def generate_human_readable_status(context: ContextTypes.DEFAULT_TYPE) -> str:
     if not active_campaigns:
@@ -927,67 +1022,12 @@ async def generate_human_readable_status(context: ContextTypes.DEFAULT_TYPE) -> 
         status = "\n" + "\n\n".join(status_lines) + "\n"
     return status
 
-# === ОБНОВЛЕННАЯ ОТПРАВКА СООБЩЕНИЯ С ЖИРНЫМ ТЕКСТОМ ===
-
-async def send_saved_message(update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict):
-    try:
-        # ОБНОВЛЕННЫЙ заголовок с жирным текстом
-        standard_header = "<b>✅ | Спасибо за подписки!</b>\n\n"
-        bot_mention = "\n\n@LinksSecret_Bot"
-        
-        # Создаем клавиатуру с кнопкой
-        keyboard = [
-            [InlineKeyboardButton("⚡️ Больше скриптов ⚡️", url="https://t.me/script_f")]
-        ]
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        if data['type'] == 'text':
-            full_content = standard_header + data['content'] + bot_mention
-            await update.message.reply_text(
-                full_content, 
-                parse_mode="HTML",
-                reply_markup=reply_markup,
-                disable_web_page_preview=True
-            )
-        elif data['type'] == 'photo':
-            caption = data.get('caption', '')
-            full_caption = standard_header + caption + bot_mention
-            await update.message.reply_photo(
-                photo=data['content'], 
-                caption=full_caption, 
-                parse_mode="HTML",
-                reply_markup=reply_markup
-            )
-        elif data['type'] == 'video':
-            caption = data.get('caption', '')
-            full_caption = standard_header + caption + bot_mention
-            await update.message.reply_video(
-                video=data['content'], 
-                caption=full_caption, 
-                parse_mode="HTML",
-                reply_markup=reply_markup
-            )
-        elif data['type'] == 'document':
-            caption = data.get('caption', '')
-            full_caption = standard_header + caption + bot_mention
-            await update.message.reply_document(
-                document=data['content'], 
-                caption=full_caption, 
-                parse_mode="HTML",
-                reply_markup=reply_markup
-            )
-    except Exception as e:
-        logging.error(f"Ошибка отправки сохранённого сообщения: {e}")
-        await update.message.reply_text("❌ Ошибка при отправке контента.")
-
 async def show_subscription_prompt_inplace(update: Update, context: ContextTypes.DEFAULT_TYPE, message_text: str = None):
     if update.effective_chat.type != "private":
         return
     user_id = update.effective_user.id
     user_ids.add(user_id)
     
-    # Проверяем подписки через SubGram (ОБЯЗАТЕЛЬНАЯ ПРОВЕРКА)
     user = update.effective_user
     user_data = {
         'first_name': user.first_name or '',
@@ -1003,15 +1043,12 @@ async def show_subscription_prompt_inplace(update: Update, context: ContextTypes
     )
     
     if not is_allowed:
-        # Показываем сообщение с просьбой подписаться
         if update.callback_query:
             await update.callback_query.message.edit_text(text, reply_markup=reply_markup)
         else:
             await update.effective_message.reply_text(text, reply_markup=reply_markup)
         return
 
-    # Пользователь подписан на все каналы
-    # Обновленное приветствие с жирным текстом
     user = update.effective_user
     first_name = user.first_name or "друг"
     last_name = user.last_name or ""
@@ -1042,73 +1079,6 @@ async def show_subscription_prompt_inplace(update: Update, context: ContextTypes
         await update.callback_query.message.edit_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
     else:
         await update.effective_message.reply_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "cancel_broadcast":
-        context.user_data.pop("broadcast_mode", None)
-        await query.edit_message_text("❌ Режим рассылки отменён.")
-        return
-
-    if query.data == "cancel_link":
-        context.user_data.pop("create_link_mode", None)
-        await query.edit_message_text("❌ Создание ссылки отменено.")
-        return
-
-    if query.data == "check_sub":
-        user_id = query.from_user.id
-        user = query.from_user
-        user_data = {
-            'first_name': user.first_name or '',
-            'username': user.username or '',
-            'language_code': user.language_code or 'ru',
-            'is_premium': user.is_premium if hasattr(user, 'is_premium') else False
-        }
-        
-        # Проверяем подписки через SubGram
-        is_allowed, text, reply_markup = await check_user_subscriptions(
-            user_id, 
-            query.message.chat.id,
-            user_data
-        )
-        
-        if not is_allowed:
-            # Показываем сообщение с просьбой подписаться
-            await query.edit_message_text(text, reply_markup=reply_markup)
-        else:
-            # Обновленное приветствие с жирным текстом
-            first_name = user.first_name or "друг"
-            last_name = user.last_name or ""
-            if last_name:
-                name = f"{first_name} {last_name}"
-            else:
-                name = first_name
-                
-            welcome = f"""<b>👋 Привет, друг/подруга {name}!</b>
-
-<b>Добро пожаловать в Secret Link</b> — место, где ты можешь быстро и безопасно получить свой скрипт для Roblox.
-
-<b>🔹 Что тебя ждёт:</b>
-• <b>⚡️ Только лучшие скрипты</b> — без вирусов, рекламы и переходников  
-• <b>🛡 Проверены вручную</b> — гарантированная безопасность
-• <b>🔁 Постоянные обновления</b> — всё актуально и стабильно работает
-
-<b>❗️ Важно:</b>  
-Чтобы получить скрипт — просто перейди в нужный канал и нажми кнопку «Получить скрипт 🚀»
-
-Для сотрудничества: @SecretLinkAds"""
-
-            keyboard = [
-                [InlineKeyboardButton("🔥 Наш канал ", url="https://t.me/script_f")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(welcome, reply_markup=reply_markup, parse_mode="HTML")
-
-# === Flyer интеграция ===
 
 async def create_flyer_via_api(template_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     headers = {"Content-Type": "application/json"}
@@ -1227,14 +1197,28 @@ async def flyer_create_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await update.message.reply_text(f"⚠️ Flyer вернул нестандартный ответ:\n<pre>{resp}</pre>", parse_mode="HTML")
 
+def parse_message_with_buttons(text: str):
+    if "\nBUTTONS:\n" not in text:
+        return text, []
+    parts = text.split("\nBUTTONS:\n", 1)
+    message_text = parts[0]
+    button_lines = parts[1].strip().split("\n")
+    buttons = []
+    for line in button_lines[:10]:
+        if " | " in line:
+            name, url = line.split(" | ", 1)
+            name = name.strip()
+            url = url.strip()
+            if name and url.startswith(("http://", "https://", "tg://")):
+                buttons.append([InlineKeyboardButton(name, url=url)])
+    return message_text, buttons
+
 async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if update.effective_user:
             user_ids.add(update.effective_user.id)
     except:
         pass
-
-# === СОЗДАНИЕ ССЫЛОК И РАССЫЛКА ===
 
 async def create_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -1254,7 +1238,6 @@ async def create_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     password = None
     raw_content = ""
 
-    # Поддерживаем формат #password text (один # и слово пароля)
     def extract_password_and_text(s: str):
         s = s.strip()
         if s.startswith("#"):
@@ -1420,42 +1403,43 @@ async def handle_deletion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка: {str(e)}")
 
-# === ЗАПУСК ===
-
 def main():
     TOKEN = os.getenv("TELEGRAM_TOKEN", "8549573387:AAGJynndMV16Z_Rr0YgbnTd6nWahzkw221g")
+    SUBGRAM_API_KEY_ENV = os.getenv("SUBGRAM_API_KEY", "f5d4e6567b52e995ebf408cb75ac22740e25c9a02a0427941386c97e8843e891")
+    
+    global SUBGRAM_API_KEY
+    if SUBGRAM_API_KEY_ENV:
+        SUBGRAM_API_KEY = SUBGRAM_API_KEY_ENV
+    
+    if SUBGRAM_API_KEY == "f5d4e6567b52e995ebf408cb75ac22740e25c9a02a0427941386c97e8843e891":
+        print("⚠️ ВНИМАНИЕ: Вы используете тестовый API ключ SubGram!")
+        print("Замените SUBGRAM_API_KEY на ваш настоящий ключ из SubGram")
     
     application = Application.builder().token(TOKEN).build()
 
-    # Трекинг всех пользователей
     application.add_handler(MessageHandler(filters.ALL, track_user), group=-1)
 
-    # Основные команды
     application.add_handler(CommandHandler("start", start_with_code))
     application.add_handler(CommandHandler("admin", admin_menu))
     application.add_handler(CommandHandler("setup", setup_command))
     application.add_handler(CommandHandler("flyer_create", flyer_create_command))
     application.add_handler(CommandHandler("cancel", cancel_upload))
 
-    # Callback handlers
     application.add_handler(CallbackQueryHandler(button_handler, pattern="^check_sub$|^cancel_"))
     application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^admin_"))
     application.add_handler(CallbackQueryHandler(handle_deletion, pattern=r"^(del_all|del_-?\d+)$"))
     application.add_handler(CallbackQueryHandler(admin_upload_handler, pattern="^admin_upload_"))
 
-    # Обработка групповых сообщений ТОЛЬКО в разрешенной группе
     application.add_handler(MessageHandler(filters.Chat(ALLOWED_GROUP_ID), handle_group_message), group=0)
     
-    # Загрузка через админку
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL, handle_admin_upload), group=1)
     
-    # Создание ссылок и рассылка
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL, create_link_handler), group=2)
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL, broadcast_handler), group=3)
 
     print(f"✅ Бот запущен...")
     print(f"📌 Работает только в группе ID: {ALLOWED_GROUP_ID}")
-    print(f"🔗 SubGram API: Интегрирован")
+    print(f"🔗 SubGram API: {'✅ Настроен' if SUBGRAM_API_KEY and SUBGRAM_API_KEY != 'ВАШ_API_КЛЮЧ_БОТА' else '❌ Нужен API ключ'}")
     
     application.run_polling()
 
