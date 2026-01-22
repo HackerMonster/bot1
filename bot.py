@@ -2,7 +2,7 @@ import asyncio
 import logging
 import aiohttp
 
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
@@ -11,8 +11,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 # ================== НАСТРОЙКИ ==================
 
-BOT_TOKEN = "8549573387:AAGJynndMV16Z_Rr0YgbnTd6nWahzkw221g"
-SUBGRAM_API_KEY = "f5d4e6567b52e995ebf408cb75ac22740e25c9a02a0427941386c97e8843e891"
+BOT_TOKEN = "8549573387:AAGJynndMV16Z_Rr0YgbnTd6nWahzkw221g"  # ⚠️ ВНИМАНИЕ: Это тестовый токен, замените на реальный!
+SUBGRAM_API_KEY = "f5d4e6567b52e995ebf408cb75ac22740e25c9a02a0427941386c97e8843e891"  # ⚠️ Храните в безопасном месте!
 SUBGRAM_URL = "https://api.subgram.org/get-sponsors"
 
 CHANNEL_URL = "https://t.me/script_f"
@@ -21,14 +21,13 @@ ADMIN_ID = 5870949629
 # ===============================================
 
 logging.basicConfig(level=logging.INFO)
-router = Dispatcher()
-storage = MemoryStorage()
+router = Router()
 
 # Хранилище пользователей
 USERS = set()
 
 
-# ================== FSM ==================
+# ================== FSM для рассылки ==================
 
 class BroadcastState(StatesGroup):
     content = State()
@@ -50,7 +49,14 @@ async def get_subgram_sponsors(user_id: int, chat_id: int) -> dict | None:
                 json=payload,
                 timeout=10
             ) as response:
-                return await response.json()
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    logging.error(f"SubGram API error: {response.status}")
+                    return None
+    except asyncio.TimeoutError:
+        logging.error("SubGram API timeout")
+        return None
     except Exception as e:
         logging.error(f"SubGram API error: {e}")
         return None
@@ -58,8 +64,15 @@ async def get_subgram_sponsors(user_id: int, chat_id: int) -> dict | None:
 
 # ================== Приветствие ==================
 
-async def send_welcome(message: types.Message):
-    USERS.add(message.from_user.id)
+async def send_welcome(target: types.Message | types.CallbackQuery):
+    if isinstance(target, types.Message):
+        user_id = target.from_user.id
+        chat = target
+    else:
+        user_id = target.from_user.id
+        chat = target.message
+    
+    USERS.add(user_id)
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -80,11 +93,19 @@ async def send_welcome(message: types.Message):
         "<b>Для сотрудничества:</b> @SecretLinkAds"
     )
 
-    await message.answer(
-        text.format(nick=message.from_user.full_name),
-        reply_markup=keyboard,
-        parse_mode="HTML"
-    )
+    if isinstance(target, types.Message):
+        await target.answer(
+            text.format(nick=target.from_user.full_name),
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    else:
+        await target.message.edit_text(
+            text.format(nick=target.from_user.full_name),
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+        await target.answer()
 
 
 # ================== /start ==================
@@ -94,21 +115,22 @@ async def start_handler(message: types.Message):
     response = await get_subgram_sponsors(message.from_user.id, message.chat.id)
 
     if response and response.get("status") == "warning":
+        # Здесь должна быть логика обработки неподписанных пользователей
+        # Например, показать кнопку для подписки
         return
 
     await send_welcome(message)
 
-
-# ================== callback SubGram ==================
 
 @router.callback_query(F.data == "subgram-op")
 async def subgram_callback(callback: types.CallbackQuery):
     response = await get_subgram_sponsors(callback.from_user.id, callback.message.chat.id)
 
     if response and response.get("status") == "warning":
+        # Здесь должна быть логика обработки неподписанных пользователей
         return
 
-    await send_welcome(callback.message)
+    await send_welcome(callback)
 
 
 # ================== АДМИН ==================
@@ -116,6 +138,7 @@ async def subgram_callback(callback: types.CallbackQuery):
 @router.message(Command("admin"))
 async def admin_panel(message: types.Message):
     if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ У вас нет доступа к админ-панели")
         return
 
     keyboard = InlineKeyboardMarkup(
@@ -139,13 +162,13 @@ async def admin_callbacks(callback: types.CallbackQuery, state: FSMContext):
         subscribed = 0
         for user_id in USERS:
             try:
-                resp = asyncio.run(get_subgram_sponsors(user_id, callback.message.chat.id))
+                resp = await get_subgram_sponsors(user_id, callback.message.chat.id)
                 if resp and resp.get("status") != "warning":
                     subscribed += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logging.error(f"Error checking subscription for {user_id}: {e}")
 
-        await callback.message.answer(
+        await callback.message.edit_text(
             f"📊 <b>Статистика</b>\n\n"
             f"Всего пользователей: {total_users}\n"
             f"Подписавшиеся: {subscribed}\n"
@@ -154,7 +177,7 @@ async def admin_callbacks(callback: types.CallbackQuery, state: FSMContext):
         )
 
     elif callback.data == "admin_broadcast":
-        await callback.message.answer(
+        await callback.message.edit_text(
             "📢 <b>Рассылка</b>\n\n"
             "Отправь любой контент:\n"
             "текст / фото / видео / документ / GIF / стикер\n\n"
@@ -170,7 +193,21 @@ async def admin_callbacks(callback: types.CallbackQuery, state: FSMContext):
 
 @router.message(BroadcastState.content)
 async def get_broadcast_content(message: types.Message, state: FSMContext):
-    await state.update_data(content=message)
+    # Сохраняем не сам объект message, а его данные
+    content_data = {
+        'message_id': message.message_id,
+        'chat_id': message.chat.id,
+        'content_type': message.content_type,
+        'text': message.text,
+        'caption': message.caption,
+        'photo': message.photo[-1].file_id if message.photo else None,
+        'video': message.video.file_id if message.video else None,
+        'document': message.document.file_id if message.document else None,
+        'animation': message.animation.file_id if message.animation else None,
+        'sticker': message.sticker.file_id if message.sticker else None,
+    }
+    
+    await state.update_data(content=content_data)
 
     await message.answer(
         "⛓ <b>КНОПКИ: URL</b>\n\n"
@@ -186,8 +223,11 @@ async def get_broadcast_content(message: types.Message, state: FSMContext):
 
 
 def parse_buttons(text: str) -> InlineKeyboardMarkup | None:
+    if text.lower() == "нет":
+        return None
+        
     keyboard = []
-    rows = text.split("\n")
+    rows = text.strip().split("\n")
 
     for row in rows[:15]:
         buttons = []
@@ -196,7 +236,10 @@ def parse_buttons(text: str) -> InlineKeyboardMarkup | None:
         for part in parts[:8]:
             if "-" not in part:
                 continue
-            name, url = part.split("-", 1)
+            name_url = part.split("-", 1)
+            if len(name_url) != 2:
+                continue
+            name, url = name_url
             buttons.append(InlineKeyboardButton(text=name.strip(), url=url.strip()))
 
         if buttons:
@@ -207,11 +250,8 @@ def parse_buttons(text: str) -> InlineKeyboardMarkup | None:
 
 @router.message(BroadcastState.buttons)
 async def get_buttons(message: types.Message, state: FSMContext):
-    if message.text.lower() != "нет":
-        keyboard = parse_buttons(message.text)
-        await state.update_data(keyboard=keyboard)
-    else:
-        await state.update_data(keyboard=None)
+    keyboard = parse_buttons(message.text)
+    await state.update_data(buttons=keyboard)
 
     await message.answer(
         "✅ Готово. Отправить рассылку?\nНапиши <b>да</b> или <b>нет</b>",
@@ -228,23 +268,78 @@ async def confirm_broadcast(message: types.Message, state: FSMContext, bot: Bot)
         return
 
     data = await state.get_data()
-    content: types.Message = data["content"]
-    keyboard = data.get("keyboard")
+    content_data = data["content"]
+    keyboard = data.get("buttons")
 
     sent = 0
+    failed = 0
+    
     for user_id in USERS:
         try:
-            await content.copy_to(chat_id=user_id, reply_markup=keyboard)
+            # Отправляем контент в зависимости от типа
+            if content_data['content_type'] == 'text':
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=content_data['text'],
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            elif content_data['content_type'] == 'photo':
+                await bot.send_photo(
+                    chat_id=user_id,
+                    photo=content_data['photo'],
+                    caption=content_data.get('caption'),
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            elif content_data['content_type'] == 'video':
+                await bot.send_video(
+                    chat_id=user_id,
+                    video=content_data['video'],
+                    caption=content_data.get('caption'),
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            elif content_data['content_type'] == 'document':
+                await bot.send_document(
+                    chat_id=user_id,
+                    document=content_data['document'],
+                    caption=content_data.get('caption'),
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            elif content_data['content_type'] == 'animation':
+                await bot.send_animation(
+                    chat_id=user_id,
+                    animation=content_data['animation'],
+                    caption=content_data.get('caption'),
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            elif content_data['content_type'] == 'sticker':
+                await bot.send_sticker(
+                    chat_id=user_id,
+                    sticker=content_data['sticker'],
+                    reply_markup=keyboard
+                )
+                
             sent += 1
-        except Exception:
-            pass
+            await asyncio.sleep(0.05)  # Защита от флуда
+            
+        except Exception as e:
+            failed += 1
+            logging.error(f"Failed to send to {user_id}: {e}")
 
-    await message.answer(f"✅ Рассылка завершена\nОтправлено: {sent}")
+    await message.answer(f"✅ Рассылка завершена\nОтправлено: {sent}\nНе удалось: {failed}")
     await state.clear()
 
 
 @router.message(Command("cancel"))
 async def cancel(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        return
+        
     await state.clear()
     await message.answer("❌ Действие отменено")
 
@@ -252,10 +347,13 @@ async def cancel(message: types.Message, state: FSMContext):
 # ================== RUN ==================
 
 async def main():
-    bot = Bot(BOT_TOKEN)
-    dp = Dispatcher(bot=bot, storage=storage)
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-    await dp.start_polling()
+    
+    # Удаляем вебхук и запускаем поллинг
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
