@@ -47,6 +47,10 @@ class BroadcastStates(StatesGroup):
     waiting_for_message = State()
     waiting_for_buttons = State()
 
+# FSM состояния для загрузки скриптов через /addlink
+class AddLinkStates(StatesGroup):
+    waiting_for_script = State()
+
 # ================== БАЗА ДАННЫХ ДЛЯ ССЫЛОК И СОЗДАТЕЛЕЙ ==================
 
 def init_database():
@@ -502,6 +506,107 @@ async def check_subscription_callback(callback: types.CallbackQuery):
         return
     
     await send_welcome(callback.message)
+
+# ================== КОМАНДА /addlink ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ ==================
+
+@router.message(Command("addlink"))
+async def addlink_command(message: types.Message, state: FSMContext):
+    """Команда /addlink для всех пользователей"""
+    if message.chat.type != "private":
+        return
+    
+    # Проверка подписки через SubGram
+    response = await get_subgram_sponsors(message.from_user.id, message.chat.id)
+    
+    if response and response.get("status") == "warning":
+        keyboard = create_subscription_keyboard(response)
+        warning_message = "❗ Чтобы загрузить скрипт, подпишитесь на следующие каналы:"
+        
+        await message.answer(
+            warning_message,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+        return
+    
+    # Если пользователь подписан, продолжаем
+    await state.set_state(AddLinkStates.waiting_for_script)
+    
+    await message.answer(
+        "📤 <b>Загрузка скрипта</b>\n\n"
+        "Отправьте скрипт для Roblox.\n\n"
+        "После отправки бот создаст уникальную ссылку на скрипт.\n\n"
+        "<i>Просто отправьте скрипт следующим сообщением</i>",
+        parse_mode="HTML"
+    )
+
+@router.message(AddLinkStates.waiting_for_script)
+async def handle_user_script(message: types.Message, state: FSMContext):
+    """Обработка скрипта от пользователя"""
+    if message.chat.type != "private":
+        return
+    
+    # Получаем текст скрипта
+    script_content = ""
+    
+    if message.content_type == 'text':
+        script_content = message.text.strip()
+    elif message.content_type == 'document' and message.document:
+        try:
+            file = await message.bot.download(message.document)
+            content = file.read()
+            if isinstance(content, bytes):
+                script_content = content.decode('utf-8', errors='ignore')
+            else:
+                script_content = str(content)
+        except Exception as e:
+            await message.answer(f"❌ Не удалось прочитать файл: {str(e)}. Отправьте скрипт как текст.")
+            await state.clear()
+            return
+    else:
+        await message.answer("❌ Отправьте скрипт в виде текста или текстового файла.")
+        await state.clear()
+        return
+    
+    if not script_content or len(script_content.strip()) < 10:
+        await message.answer("❌ Скрипт не может быть пустым или слишком коротким (минимум 10 символов).")
+        await state.clear()
+        return
+    
+    # Очищаем состояние
+    await state.clear()
+    
+    # Сохраняем скрипт в базу данных (публичный скрипт от пользователя)
+    unique_code = save_script_to_db(
+        script_content, 
+        message.from_user.id, 
+        is_public=True,
+        original_message_id=message.message_id
+    )
+    
+    # Создаем ссылку
+    link = f"https://t.me/{BOT_USERNAME}?start={unique_code}"
+    
+    # Показываем результат
+    preview_text = "<b>✅ Скрипт успешно загружен!</b>\n\n"
+    preview_text += f"<b>🎯 Уникальная ссылка:</b>\n<code>{link}</code>\n\n"
+    preview_text += "<b>📎 Поделитесь этой ссылкой с друзьями!</b>\n\n"
+    
+    script_preview = script_content[:150] + "..." if len(script_content) > 150 else script_content
+    formatted_preview = format_script_for_display(script_preview)
+    
+    preview_text += "<b>📝 Предпросмотр вашего скрипта:</b>\n"
+    preview_text += formatted_preview
+    
+    # Добавляем кнопку для быстрого перехода
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔗 Открыть скрипт", url=link)],
+            [InlineKeyboardButton(text="⚡️ Больше скриптов", url="https://t.me/script_f")]
+        ]
+    )
+    
+    await message.answer(preview_text, reply_markup=keyboard, parse_mode="HTML")
 
 # ================== КОМАНДЫ ДЛЯ СОЗДАТЕЛЕЙ СКРИПТОВ ==================
 
@@ -1034,11 +1139,11 @@ async def back_to_admin_callback(callback: types.CallbackQuery):
     
     await callback.message.edit_text(admin_text, reply_markup=keyboard, parse_mode="HTML")
 
-# ================== ОБРАБОТКА ЗАГРУЗКИ СКРИПТА ==================
+# ================== ОБРАБОТКА ЗАГРУЗКИ СКРИПТА ИЗ АДМИН-ПАНЕЛИ ==================
 
 @router.message(F.content_type.in_({'text', 'document'}))
 async def handle_script_upload(message: types.Message):
-    """Обработка загрузки скрипта"""
+    """Обработка загрузки скрипта из админ-панели"""
     if message.chat.type != "private":
         return
     
@@ -1051,9 +1156,9 @@ async def handle_script_upload(message: types.Message):
             )
         return
     
-    # Проверяем, что пользователь начал процесс загрузки скрипта
+    # Проверяем, что пользователь начал процесс загрузки скрипта через админ-панель
     if message.from_user.id not in UPLOADING_USERS:
-        # Если пользователь не в процессе загрузки, просто игнорируем сообщение
+        # Если пользователь не в процессе загрузки через админ-панель, проверяем другие команды
         return
     
     # Убираем пользователя из списка загрузки
