@@ -6,11 +6,12 @@ import re
 import random
 import string
 from datetime import datetime
+import tempfile
 import os
 
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -393,21 +394,18 @@ async def check_subscription_callback(callback: types.CallbackQuery, state: FSMC
     
     await state.clear()
 
-# ================== РАБОТА В ГРУППЕ (ИСПРАВЛЕНО) ==================
+# ================== РАБОТА В ГРУППЕ (ИСПРАВЛЕНО ДЛЯ НОВОЙ ВЕРСИИ AIOGRAM) ==================
 
 @router.message(F.chat.id == GROUP_CHAT_ID)
-async def handle_group_message(message: types.Message):
+async def handle_group_message(message: types.Message, bot: Bot):
     """Обработка сообщений в группе"""
-    # ИСПРАВЛЕНО: Проверка topic_id с обработкой исключений
+    # Проверяем, что это нужный топик
     try:
-        # Проверяем, что это нужный топик (ID: 2)
-        # Используем getattr для безопасной проверки атрибута
-        if hasattr(message, 'message_thread_id') and message.message_thread_id is not None:
+        if hasattr(message, 'message_thread_id') and message.message_thread_id:
             if message.message_thread_id != GROUP_TOPIC_ID:
                 return
-    except Exception as e:
-        logger.error(f"Ошибка проверки topic_id: {e}")
-        # Если не получается проверить, продолжаем обработку
+    except:
+        pass
     
     # Пропускаем команды
     if message.text and message.text.startswith('/'):
@@ -416,25 +414,38 @@ async def handle_group_message(message: types.Message):
     user_id = message.from_user.id
     user_name = message.from_user.full_name or f"user_{user_id}"
     
+    logger.info(f"Получено сообщение в группе от {user_name}: тип={message.content_type}")
+    
     try:
         # Получаем текст сообщения
         script_content = ""
         
         if message.content_type == 'text':
             script_content = message.text.strip()
-            logger.info(f"Получен текст от {user_name} в группе: {script_content[:50]}...")
+            logger.info(f"Получен текст: {script_content[:50]}...")
             
         elif message.content_type == 'document' and message.document:
-            logger.info(f"Получен документ от {user_name} в группе: {message.document.file_name}")
+            logger.info(f"Получен документ: {message.document.file_name}")
             try:
-                # ИСПРАВЛЕНО: Загрузка файла через бота
-                file = await message.bot.download(message.document)
-                if hasattr(file, 'read'):
-                    script_content = file.read().decode('utf-8', errors='ignore')
-                else:
-                    with open(file, 'r', encoding='utf-8', errors='ignore') as f:
-                        script_content = f.read()
+                # ИСПРАВЛЕНО: Создаем временный файл и скачиваем документ
+                with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.txt', encoding='utf-8') as tmp_file:
+                    tmp_path = tmp_file.name
+                
+                # Скачиваем файл
+                await bot.download(
+                    message.document,
+                    destination=tmp_path
+                )
+                
+                # Читаем файл
+                with open(tmp_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    script_content = f.read()
+                
+                # Удаляем временный файл
+                os.unlink(tmp_path)
+                
                 logger.info(f"Файл прочитан, размер: {len(script_content)} символов")
+                
             except Exception as e:
                 logger.error(f"Ошибка чтения файла: {e}")
                 await message.reply("❌ Не удалось прочитать файл. Отправьте скрипт как текст.")
@@ -472,12 +483,16 @@ async def handle_group_message(message: types.Message):
         )
         
         # Кнопка для перехода к скрипту
-        keyboard = [[InlineKeyboardButton("🔗 Перейти к скрипту", url=link)]]
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton("🔗 Перейти к скрипту", url=link)]
+            ]
+        )
         
-        await message.reply(
+        reply_message = await message.reply(
             reply_text,
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+            reply_markup=keyboard,
             disable_web_page_preview=True
         )
         
@@ -486,7 +501,7 @@ async def handle_group_message(message: types.Message):
     except Exception as e:
         logger.error(f"Ошибка обработки группового сообщения: {e}", exc_info=True)
         try:
-            await message.reply(f"❌ Ошибка при создании ссылки: {str(e)[:100]}")
+            await message.reply(f"❌ Ошибка при создании ссылки")
         except:
             pass
 
@@ -533,8 +548,8 @@ async def upload_script_callback(callback: types.CallbackQuery, state: FSMContex
     await callback.answer()
 
 @router.message(UploadScriptState.waiting_script)
-async def process_script_upload(message: types.Message, state: FSMContext):
-    """ИСПРАВЛЕНО: Загрузка скрипта через админ-панель"""
+async def process_script_upload(message: types.Message, state: FSMContext, bot: Bot):
+    """Загрузка скрипта через админ-панель"""
     if message.chat.type != "private":
         await state.clear()
         return
@@ -553,12 +568,20 @@ async def process_script_upload(message: types.Message, state: FSMContext):
         elif message.content_type == 'document' and message.document:
             logger.info(f"Админ загрузил документ: {message.document.file_name}")
             try:
-                file = await message.bot.download(message.document)
-                if hasattr(file, 'read'):
-                    script_content = file.read().decode('utf-8', errors='ignore')
-                else:
-                    with open(file, 'r', encoding='utf-8', errors='ignore') as f:
-                        script_content = f.read()
+                # Используем временный файл для чтения
+                with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.txt', encoding='utf-8') as tmp_file:
+                    tmp_path = tmp_file.name
+                
+                await bot.download(
+                    message.document,
+                    destination=tmp_path
+                )
+                
+                with open(tmp_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    script_content = f.read()
+                
+                os.unlink(tmp_path)
+                
             except Exception as e:
                 logger.error(f"Ошибка чтения файла админом: {e}")
                 await message.answer("❌ Не удалось прочитать файл. Отправьте скрипт как текст.")
@@ -605,7 +628,7 @@ async def process_script_upload(message: types.Message, state: FSMContext):
         
     except Exception as e:
         logger.error(f"Ошибка загрузки скрипта админом: {e}", exc_info=True)
-        await message.answer(f"❌ Ошибка при загрузке скрипта: {str(e)[:100]}")
+        await message.answer(f"❌ Ошибка при загрузке скрипта")
     
     await state.clear()
 
