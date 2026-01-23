@@ -2,6 +2,7 @@ import asyncio
 import logging
 import aiohttp
 import sqlite3
+import os
 import re
 import random
 import string
@@ -35,13 +36,45 @@ router = Router()
 
 # Хранилище пользователей
 USERS = set()
+# Хранилище состояний загрузки скриптов
+UPLOADING_USERS = set()
+# Хранилище для данных рассылки
+broadcast_data = {}
+broadcast_buttons = {}
 
-# ================== БАЗА ДАННЫХ ДЛЯ ССЫЛОК ==================
+# FSM состояния для рассылки
+class BroadcastStates(StatesGroup):
+    waiting_for_message = State()
+    waiting_for_buttons = State()
+
+# ================== БАЗА ДАННЫХ ДЛЯ ССЫЛОК И СОЗДАТЕЛЕЙ ==================
 
 def init_database():
-    """Инициализация базы данных для скриптов"""
-    conn = sqlite3.connect('scripts.db')
-    cursor = conn.cursor()
+    """Инициализация базы данных для скриптов и создателей"""
+    if os.path.exists('scripts.db'):
+        try:
+            conn = sqlite3.connect('scripts.db')
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(scripts)")
+            columns = [col[1] for col in cursor.fetchall()]
+            
+            if 'is_public' not in columns:
+                conn.close()
+                os.remove('scripts.db')
+                print("Удалена старая база данных с ошибками")
+                conn = sqlite3.connect('scripts.db')
+                cursor = conn.cursor()
+            else:
+                print("База данных в порядке")
+        except:
+            conn.close()
+            if os.path.exists('scripts.db'):
+                os.remove('scripts.db')
+            conn = sqlite3.connect('scripts.db')
+            cursor = conn.cursor()
+    else:
+        conn = sqlite3.connect('scripts.db')
+        cursor = conn.cursor()
     
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS scripts (
@@ -55,34 +88,104 @@ def init_database():
     )
     ''')
     
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS script_creators (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER UNIQUE NOT NULL,
+        username TEXT,
+        full_name TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        is_active BOOLEAN DEFAULT 1
+    )
+    ''')
+    
+    try:
+        cursor.execute('INSERT OR IGNORE INTO script_creators (user_id, username, full_name) VALUES (?, ?, ?)',
+                      (ADMIN_ID, 'admin', 'Главный Администратор'))
+    except:
+        pass
+    
     conn.commit()
     conn.close()
+    print("База данных инициализирована")
 
 init_database()
 
-# ================== FSM СОСТОЯНИЯ ==================
+# ================== ФУНКЦИИ ДЛЯ РАБОТЫ С СОЗДАТЕЛЯМИ ==================
 
-class UploadScriptState(StatesGroup):
-    waiting_script = State()
+def is_script_creator(user_id: int) -> bool:
+    """Проверяет, является ли пользователь создателем скриптов"""
+    if user_id == ADMIN_ID:
+        return True
+    
+    conn = sqlite3.connect('scripts.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT 1 FROM script_creators WHERE user_id = ? AND is_active = 1', (user_id,))
+    result = cursor.fetchone()
+    
+    conn.close()
+    
+    return result is not None
 
-class BroadcastState(StatesGroup):
-    waiting_content = State()
-    waiting_buttons = State()
-    waiting_confirmation = State()
+def add_script_creator(user_id: int, username: str = None, full_name: str = None) -> bool:
+    """Добавляет пользователя в создатели скриптов"""
+    conn = sqlite3.connect('scripts.db')
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+        INSERT OR REPLACE INTO script_creators (user_id, username, full_name, is_active)
+        VALUES (?, ?, ?, 1)
+        ''', (user_id, username, full_name))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logging.error(f"Error adding script creator: {e}")
+        conn.close()
+        return False
+
+def remove_script_creator(user_id: int) -> bool:
+    """Удаляет пользователя из создателей скриптов"""
+    conn = sqlite3.connect('scripts.db')
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('DELETE FROM script_creators WHERE user_id = ?', (user_id,))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logging.error(f"Error removing script creator: {e}")
+        conn.close()
+        return False
+
+def get_all_script_creators():
+    """Получает список всех создателей скриптов"""
+    conn = sqlite3.connect('scripts.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    SELECT user_id, username, full_name, created_at, is_active 
+    FROM script_creators 
+    ORDER BY created_at DESC
+    ''')
+    
+    creators = cursor.fetchall()
+    conn.close()
+    
+    return creators
 
 # ================== ФУНКЦИИ ДЛЯ РАБОТЫ С БД ==================
 
 def generate_unique_code():
     """Генерация уникального кода для ссылки от 7 до 25 символов"""
-    # Длина случайная от 7 до 25 символов
     length = random.randint(7, 25)
-    
-    # Используем английские буквы, цифры и дефис
     characters = string.ascii_letters + string.digits + "-"
-    
-    # Генерируем код
     code = ''.join(random.choice(characters) for _ in range(length))
-    
     return code
 
 def save_script_to_db(script_content: str, created_by: int, is_public=False, original_message_id=None):
@@ -90,7 +193,6 @@ def save_script_to_db(script_content: str, created_by: int, is_public=False, ori
     conn = sqlite3.connect('scripts.db')
     cursor = conn.cursor()
     
-    # Генерируем уникальный код пока не найдем свободный
     while True:
         unique_code = generate_unique_code()
         cursor.execute('SELECT 1 FROM scripts WHERE unique_code = ?', (unique_code,))
@@ -128,17 +230,35 @@ def get_statistics():
     conn = sqlite3.connect('scripts.db')
     cursor = conn.cursor()
     
-    cursor.execute("SELECT COUNT(*) FROM scripts")
-    total_scripts = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM scripts WHERE created_by = ?", (ADMIN_ID,))
-    admin_scripts = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM scripts WHERE created_by != ?", (ADMIN_ID,))
-    user_scripts = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM scripts WHERE is_public = 1")
-    public_scripts = cursor.fetchone()[0]
+    try:
+        cursor.execute("SELECT COUNT(*) FROM scripts")
+        total_scripts = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM scripts WHERE created_by = ?", (ADMIN_ID,))
+        admin_scripts = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM scripts WHERE created_by != ?", (ADMIN_ID,))
+        user_scripts = cursor.fetchone()[0]
+        
+        cursor.execute("PRAGMA table_info(scripts)")
+        columns = [col[1] for col in cursor.fetchall()]
+        
+        if 'is_public' in columns:
+            cursor.execute("SELECT COUNT(*) FROM scripts WHERE is_public = 1")
+            public_scripts = cursor.fetchone()[0]
+        else:
+            public_scripts = 0
+        
+        cursor.execute("SELECT COUNT(*) FROM script_creators")
+        total_creators = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM script_creators WHERE is_active = 1")
+        active_creators = cursor.fetchone()[0]
+        
+    except Exception as e:
+        logging.error(f"Ошибка при получении статистики: {e}")
+        total_scripts = admin_scripts = user_scripts = public_scripts = 0
+        total_creators = active_creators = 0
     
     conn.close()
     
@@ -147,7 +267,9 @@ def get_statistics():
         'admin_scripts': admin_scripts,
         'user_scripts': user_scripts,
         'public_scripts': public_scripts,
-        'total_users': len(USERS)
+        'total_users': len(USERS),
+        'total_creators': total_creators,
+        'active_creators': active_creators
     }
 
 # ================== SubGram ФУНКЦИИ ==================
@@ -199,44 +321,62 @@ def create_subscription_keyboard(sponsors_data):
 
 def format_script_for_display(script_content: str) -> str:
     """Форматирование скрипта для отображения"""
-    # Убедимся, что скрипт начинается с $ для моноширинного текста
+    if not script_content:
+        return ""
+    
     if not script_content.startswith('$'):
         script_content = f"${script_content}"
     
-    # Экранируем HTML символы
     script_content = script_content.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
     
-    # Форматируем как код
     lines = script_content.split('\n')
     formatted_lines = []
     
     for line in lines:
         if line.startswith('$'):
-            # Если строка начинается с $, форматируем как <code>
             code_content = line[1:].strip()
             if code_content:
                 formatted_lines.append(f"<code>{code_content}</code>")
             else:
                 formatted_lines.append(line)
         else:
-            # Если строка не начинается с $, проверяем, есть ли $ внутри
             if '$' in line:
-                # Заменяем $text$ на <code>text</code>
                 line = re.sub(r'\$([^$\n]+)\$', r'<code>\1</code>', line)
             formatted_lines.append(line)
     
     return '\n'.join(formatted_lines)
 
+def parse_buttons(buttons_text: str):
+    """Парсинг кнопок из текста"""
+    buttons = []
+    
+    # Разделяем ряды кнопок
+    rows = buttons_text.strip().split('\n')
+    
+    for row in rows:
+        row_buttons = []
+        # Разделяем кнопки в ряду
+        button_pairs = [btn.strip() for btn in row.split('|') if btn.strip()]
+        
+        for button_pair in button_pairs:
+            if '-' in button_pair:
+                parts = button_pair.split('-', 1)
+                if len(parts) == 2:
+                    text = parts[0].strip()
+                    url = parts[1].strip()
+                    if text and url and url.startswith('http'):
+                        row_buttons.append(InlineKeyboardButton(text=text, url=url))
+        
+        if row_buttons:
+            buttons.append(row_buttons)
+    
+    return buttons
+
 # ================== ПРИВЕТСТВИЕ ==================
 
-async def send_welcome(target: types.Message | types.CallbackQuery):
-    if isinstance(target, types.Message):
-        user_id = target.from_user.id
-        chat = target
-    else:
-        user_id = target.from_user.id
-        chat = target.message
-    
+async def send_welcome(message: types.Message):
+    """Отправка приветственного сообщения"""
+    user_id = message.from_user.id
     USERS.add(user_id)
 
     keyboard = InlineKeyboardMarkup(
@@ -258,92 +398,25 @@ async def send_welcome(target: types.Message | types.CallbackQuery):
         "<b>Для сотрудничества:</b> @SecretLinkAds"
     )
 
-    if isinstance(target, types.Message):
-        await target.answer(
-            text.format(nick=target.from_user.full_name),
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
-    else:
-        await target.message.edit_text(
-            text.format(nick=target.from_user.full_name),
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
-        await target.answer()
-
-# ================== ОБРАБОТКА СООБЩЕНИЙ В ГРУППЕ ==================
-
-@router.message(F.chat.id == GROUP_ID)
-async def handle_group_message(message: types.Message, bot: Bot):
-    """Обработка сообщений в группе"""
-    
-    # Проверяем, что сообщение в нужном топике (если это форум)
-    if message.message_thread_id and message.message_thread_id != TOPIC_ID:
-        return
-    
-    # Проверяем, что сообщение не от бота
-    if message.from_user.id == bot.id:
-        return
-    
-    # Проверяем, что есть текст
-    if not message.text and not message.caption:
-        return
-    
-    # Получаем текст сообщения
-    text_content = message.text or message.caption
-    
-    # Проверяем, содержит ли сообщение loadstring или просто любой текст
-    # Можно настроить фильтры по вашему усмотрению
-    if "loadstring" in text_content.lower() or "game:HttpGet" in text_content.lower() or len(text_content) > 10:
-        # Генерируем уникальную ссылку для скрипта
-        unique_code = save_script_to_db(
-            script_content=text_content,
-            created_by=message.from_user.id,
-            is_public=True,
-            original_message_id=message.message_id
-        )
-        
-        # Создаем ссылку
-        link = f"https://t.me/{BOT_USERNAME}?start={unique_code}"
-        
-        # Форматируем ответ
-        response_text = (
-            f"✅ <b>Уникальная ссылка создана!</b>\n\n"
-            f"👤 <b>Отправитель:</b> {message.from_user.full_name}\n"
-            f"🔗 <b>Ссылка:</b> {link}\n\n"
-            f"<i>Нажмите на ссылку, чтобы получить доступ к контенту</i>"
-        )
-        
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="🔗 Получить доступ", url=link)],
-                [InlineKeyboardButton(text="📢 Наш канал", url=CHANNEL_URL)]
-            ]
-        )
-        
-        # Отправляем ответ в группу
-        await message.reply(
-            text=response_text,
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
+    await message.answer(
+        text.format(nick=message.from_user.full_name),
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
 
 # ================== /start с уникальными ссылками ==================
 
 @router.message(CommandStart())
-async def start_handler(message: types.Message, state: FSMContext):
+async def start_handler(message: types.Message):
+    """Обработка команды /start"""
     if message.chat.type != "private":
         return
     
     USERS.add(message.from_user.id)
     
-    # Если есть код в команде
     if len(message.text.split()) > 1:
         unique_code = message.text.split()[1]
-        await state.update_data(unique_code=unique_code)
         
-        # Проверяем подписку через SubGram
         response = await get_subgram_sponsors(message.from_user.id, message.chat.id)
         
         if response and response.get("status") == "warning":
@@ -357,19 +430,15 @@ async def start_handler(message: types.Message, state: FSMContext):
             )
             return
         
-        # Если подписка есть, получаем скрипт
         script_content = get_script_content(unique_code)
         
         if script_content:
             await show_script_content(message, script_content)
-            await state.clear()
             return
         else:
             await message.answer("❌ Ссылка не найдена или устарела")
-            await state.clear()
             return
     
-    # Обычный /start без кода
     response = await get_subgram_sponsors(message.from_user.id, message.chat.id)
 
     if response and response.get("status") == "warning":
@@ -392,18 +461,12 @@ async def show_script_content(message: types.Message, script_content: str):
             [InlineKeyboardButton(
                 text="⚡️ Больше скриптов ⚡️", 
                 url="https://t.me/script_f"
-            )],
-            [InlineKeyboardButton(
-                text="📤 Поделиться своим скриптом",
-                url=f"https://t.me/c/{abs(GROUP_ID) - 1000000000000}/{TOPIC_ID}"
             )]
         ]
     )
     
-    # Форматируем скрипт
     formatted_script = format_script_for_display(script_content)
     
-    # Создаем финальное сообщение
     header_text = "<b>✅ | Спасибо за подписки!</b>\n\n"
     footer_text = f"\n\n@{BOT_USERNAME}"
     
@@ -416,10 +479,10 @@ async def show_script_content(message: types.Message, script_content: str):
     )
 
 @router.callback_query(F.data == "check_subscription")
-async def check_subscription_callback(callback: types.CallbackQuery, state: FSMContext):
+async def check_subscription_callback(callback: types.CallbackQuery):
+    """Проверка подписки"""
     await callback.answer("⏳ Проверяем подписку...")
     
-    # Удаляем сообщение с кнопками
     try:
         await callback.message.delete()
     except:
@@ -438,42 +501,158 @@ async def check_subscription_callback(callback: types.CallbackQuery, state: FSMC
         )
         return
     
-    data = await state.get_data()
-    unique_code = data.get('unique_code')
+    await send_welcome(callback.message)
+
+# ================== КОМАНДЫ ДЛЯ СОЗДАТЕЛЕЙ СКРИПТОВ ==================
+
+@router.message(Command("oplink"))
+async def add_creator_command(message: types.Message):
+    """Добавление создателя скриптов"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ У вас нет прав для выполнения этой команды")
+        return
     
-    if unique_code:
-        script_content = get_script_content(unique_code)
+    if len(message.text.split()) < 2:
+        await message.answer(
+            "❌ <b>Использование:</b> /oplink [id]\n\n"
+            "<b>Пример:</b>\n"
+            "<code>/oplink 123456789</code>\n\n"
+            "Чтобы получить ID пользователя, перешлите его сообщение боту @userinfobot",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        user_id = int(message.text.split()[1])
         
-        if script_content:
-            await show_script_content(callback.message, script_content)
+        if is_script_creator(user_id):
+            await message.answer(f"❌ Пользователь с ID {user_id} уже является создателем скриптов")
+            return
+        
+        try:
+            user = await message.bot.get_chat(user_id)
+            username = user.username
+            full_name = user.full_name
+        except:
+            username = None
+            full_name = f"User_{user_id}"
+        
+        if add_script_creator(user_id, username, full_name):
+            await message.answer(
+                f"✅ <b>Создатель скриптов добавлен!</b>\n\n"
+                f"👤 <b>ID:</b> <code>{user_id}</code>\n"
+                f"📛 <b>Имя:</b> {full_name}\n"
+                f"🔗 <b>Username:</b> @{username if username else 'нет'}\n\n"
+                f"Теперь этот пользователь может загружать скрипты через админ-панель.",
+                parse_mode="HTML"
+            )
         else:
-            await callback.message.answer("❌ Ссылка не найдена или устарела")
-    else:
-        await send_welcome(callback)
+            await message.answer("❌ Ошибка при добавлении создателя")
+            
+    except ValueError:
+        await message.answer("❌ Неверный формат ID. ID должен быть числом")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+
+@router.message(Command("stoplink"))
+async def remove_creator_command(message: types.Message):
+    """Удаление создателя скриптов"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ У вас нет прав для выполнения этой команды")
+        return
     
-    await state.clear()
+    if len(message.text.split()) < 2:
+        await message.answer(
+            "❌ <b>Использование:</b> /stoplink [id]\n\n"
+            "<b>Пример:</b>\n"
+            "<code>/stoplink 123456789</code>\n\n"
+            "Чтобы посмотреть всех создателей, используйте /creators",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        user_id = int(message.text.split()[1])
+        
+        if not is_script_creator(user_id) or user_id == ADMIN_ID:
+            await message.answer(f"❌ Пользователь с ID {user_id} не является создателем скриптов")
+            return
+        
+        if remove_script_creator(user_id):
+            await message.answer(
+                f"✅ <b>Создатель скриптов удален!</b>\n\n"
+                f"👤 <b>ID:</b> <code>{user_id}</code>\n\n"
+                f"Теперь этот пользователь больше не может загружать скрипты.",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer("❌ Ошибка при удалении создателя")
+            
+    except ValueError:
+        await message.answer("❌ Неверный формат ID. ID должен быть числом")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+
+@router.message(Command("creators"))
+async def list_creators_command(message: types.Message):
+    """Показывает список всех создателей скриптов"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ У вас нет прав для выполнения этой команды")
+        return
+    
+    creators = get_all_script_creators()
+    
+    if not creators:
+        await message.answer("📭 <b>Список создателей пуст</b>", parse_mode="HTML")
+        return
+    
+    text = "<b>👥 Список создателей скриптов:</b>\n\n"
+    
+    for i, (user_id, username, full_name, created_at, is_active) in enumerate(creators, 1):
+        status = "🟢 Активен" if is_active else "🔴 Неактивен"
+        text += f"{i}. <b>ID:</b> <code>{user_id}</code>\n"
+        text += f"   <b>Имя:</b> {full_name}\n"
+        text += f"   <b>Username:</b> @{username if username else 'нет'}\n"
+        text += f"   <b>Статус:</b> {status}\n"
+        text += f"   <b>Добавлен:</b> {created_at}\n\n"
+    
+    text += f"<b>Всего:</b> {len(creators)} создателей\n"
+    text += "<b>Используйте:</b>\n"
+    text += "/oplink [id] - добавить создателя\n"
+    text += "/stoplink [id] - удалить создателя"
+    
+    await message.answer(text, parse_mode="HTML")
 
 # ================== АДМИН ПАНЕЛЬ ==================
 
 @router.message(Command("admin"))
 async def admin_panel(message: types.Message):
+    """Админ панель для главного админа и создателей скриптов"""
     if message.chat.type != "private":
         return
         
-    if message.from_user.id != ADMIN_ID:
+    if not (message.from_user.id == ADMIN_ID or is_script_creator(message.from_user.id)):
         await message.answer("⛔ У вас нет доступа к админ-панели")
         return
 
     stats = get_statistics()
     
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
-            [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
-            [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")],
-            [InlineKeyboardButton(text="👥 Публичные скрипты", callback_data="admin_public_scripts")]
-        ]
-    )
+    if message.from_user.id == ADMIN_ID:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+                [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+                [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")],
+                [InlineKeyboardButton(text="👥 Публичные скрипты", callback_data="admin_public_scripts")],
+                [InlineKeyboardButton(text="👑 Управление создателями", callback_data="admin_manage_creators")]
+            ]
+        )
+    else:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")]
+            ]
+        )
 
     admin_text = (
         "👑 <b>Админ-панель</b>\n\n"
@@ -481,33 +660,105 @@ async def admin_panel(message: types.Message):
         f"• 👥 Пользователей: {stats['total_users']}\n"
         f"• 📜 Всего скриптов: {stats['total_scripts']}\n"
         f"• 👤 Публичных: {stats['public_scripts']}\n"
-        f"• 👑 Админских: {stats['admin_scripts']}\n\n"
-        f"🔗 <b>Группа для скриптов:</b>\n"
-        f"ID: {GROUP_ID}\n"
-        f"Топик: {TOPIC_ID}"
+        f"• 👑 Админских: {stats['admin_scripts']}\n"
     )
+    
+    if message.from_user.id == ADMIN_ID:
+        admin_text += f"• 👥 Создателей: {stats['active_creators']}\n"
+    
+    admin_text += f"\n🔗 <b>Группа для скриптов:</b>\n"
+    admin_text += f"ID: {GROUP_ID}\n"
+    admin_text += f"Топик: {TOPIC_ID}"
 
     await message.answer(admin_text, reply_markup=keyboard, parse_mode="HTML")
 
+# ================== ОБРАБОТКА КНОПОК АДМИН-ПАНЕЛИ ==================
+
+@router.callback_query(F.data == "admin_stats")
+async def admin_stats_callback(callback: types.CallbackQuery):
+    """Статистика бота"""
+    if not (callback.from_user.id == ADMIN_ID or is_script_creator(callback.from_user.id)):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    
+    stats = get_statistics()
+    
+    stats_text = (
+        "📊 <b>Статистика бота</b>\n\n"
+        f"👥 Всего пользователей: <b>{stats['total_users']}</b>\n"
+        f"📜 Всего скриптов: <b>{stats['total_scripts']}</b>\n"
+        f"👤 Публичных скриптов: <b>{stats['public_scripts']}</b>\n"
+        f"👑 Загружено админом: <b>{stats['admin_scripts']}</b>\n"
+        f"👥 Загружено пользователями: <b>{stats['user_scripts']}</b>\n"
+    )
+    
+    if callback.from_user.id == ADMIN_ID:
+        stats_text += f"👥 Создателей скриптов: <b>{stats['active_creators']}</b>\n\n"
+    else:
+        stats_text += "\n"
+    
+    stats_text += (
+        f"🔗 Используется SubGram: <b>✅ Да</b>\n"
+        f"👥 Группа: <b>{GROUP_ID}</b>\n"
+        f"📌 Топик: <b>{TOPIC_ID}</b>"
+    )
+    
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="back_to_admin")]
+        ]
+    )
+    
+    await callback.message.edit_text(stats_text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_upload_script")
+async def upload_script_callback(callback: types.CallbackQuery):
+    """Загрузка скрипта"""
+    if not (callback.from_user.id == ADMIN_ID or is_script_creator(callback.from_user.id)):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    
+    UPLOADING_USERS.add(callback.from_user.id)
+    
+    await callback.message.edit_text(
+        "📤 <b>Загрузка скрипта</b>\n\n"
+        "Отправьте скрипт для Roblox.\n\n"
+        "После отправки бот создаст уникальную ссылку на скрипт.\n\n"
+        "<i>Просто отправьте скрипт следующим сообщением</i>",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
 @router.callback_query(F.data == "admin_public_scripts")
 async def admin_public_scripts(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    """Публичные скрипты"""
+    if not (callback.from_user.id == ADMIN_ID or is_script_creator(callback.from_user.id)):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
     
     conn = sqlite3.connect('scripts.db')
     cursor = conn.cursor()
     
-    cursor.execute('''
-    SELECT COUNT(*) FROM scripts WHERE is_public = 1
-    ''')
-    total_public = cursor.fetchone()[0]
+    cursor.execute("PRAGMA table_info(scripts)")
+    columns = [col[1] for col in cursor.fetchall()]
     
-    cursor.execute('''
-    SELECT unique_code, script_content, created_by, created_at 
-    FROM scripts WHERE is_public = 1 
-    ORDER BY created_at DESC LIMIT 10
-    ''')
+    if 'is_public' in columns:
+        cursor.execute('SELECT COUNT(*) FROM scripts WHERE is_public = 1')
+        total_public = cursor.fetchone()[0]
+        
+        cursor.execute('''
+        SELECT unique_code, script_content, created_by, created_at 
+        FROM scripts WHERE is_public = 1 
+        ORDER BY created_at DESC LIMIT 10
+        ''')
+    else:
+        total_public = 0
+        cursor.execute('''
+        SELECT unique_code, script_content, created_by, created_at 
+        FROM scripts 
+        ORDER BY created_at DESC LIMIT 10
+        ''')
     
     recent_scripts = cursor.fetchall()
     conn.close()
@@ -536,74 +787,33 @@ async def admin_public_scripts(callback: types.CallbackQuery):
     await callback.message.edit_text(stats_text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
-@router.callback_query(F.data == "admin_upload_script")
-async def upload_script_callback(callback: types.CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "admin_manage_creators")
+async def admin_manage_creators(callback: types.CallbackQuery):
+    """Управление создателями скриптов (только для главного админа)"""
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
     
-    await callback.message.edit_text(
-        "📤 <b>Загрузка скрипта</b>\n\n"
-        "Отправьте скрипт для Roblox.\n\n"
-        "<b>📌 Автоматическое форматирование:</b>\n"
-        "• Скрипт будет отображаться как моноширинный текст\n"
-        "• Перед скриптом автоматически добавится $\n\n"
-        "<i>Пример скрипта:</i>\n"
-        "<code>loadstring(game:HttpGet('https://raw.githubusercontent.com/...'))()</code>\n\n"
-        "После отправки бот создаст уникальную ссылку на скрипт.",
-        parse_mode="HTML"
-    )
+    creators = get_all_script_creators()
     
-    await state.set_state(UploadScriptState.waiting_script)
-    await callback.answer()
-
-@router.message(UploadScriptState.waiting_script)
-async def process_script_upload(message: types.Message, state: FSMContext):
-    if message.chat.type != "private":
-        await state.clear()
-        return
+    text = "<b>👑 Управление создателями скриптов</b>\n\n"
     
-    if message.from_user.id != ADMIN_ID:
-        await state.clear()
-        return
-    
-    # Получаем текст скрипта
-    script_content = ""
-    
-    if message.content_type == 'text':
-        script_content = message.text.strip()
-    elif message.content_type == 'document' and message.document:
-        # Если это файл, попробуем прочитать как текстовый
-        try:
-            file = await message.bot.download(message.document)
-            script_content = file.read().decode('utf-8')
-        except:
-            await message.answer("❌ Не удалось прочитать файл. Отправьте скрипт как текст.")
-            return
+    if creators:
+        text += "<b>Текущие создатели:</b>\n"
+        for i, (user_id, username, full_name, created_at, is_active) in enumerate(creators, 1):
+            status = "🟢" if is_active else "🔴"
+            text += f"{i}. {status} <b>ID:</b> <code>{user_id}</code>\n"
+            text += f"   👤 {full_name}\n"
+            if username:
+                text += f"   📱 @{username}\n"
+            text += f"   📅 {created_at}\n\n"
     else:
-        await message.answer("❌ Отправьте скрипт в виде текста или текстового файла.")
-        return
+        text += "📭 Создателей нет\n\n"
     
-    if not script_content:
-        await message.answer("❌ Скрипт не может быть пустым.")
-        return
-    
-    # Сохраняем скрипт в базу данных
-    unique_code = save_script_to_db(script_content, message.from_user.id)
-    
-    # Создаем ссылку
-    link = f"https://t.me/{BOT_USERNAME}?start={unique_code}"
-    
-    # Показываем результат
-    preview_text = "<b>✅ Скрипт загружен!</b>\n\n"
-    preview_text += f"<b>Уникальная ссылка:</b>\n<code>{link}</code>\n\n"
-    
-    # Показываем предпросмотр скрипта
-    script_preview = script_content[:200] + "..." if len(script_content) > 200 else script_content
-    formatted_preview = format_script_for_display(script_preview)
-    
-    preview_text += "<b>📝 Предпросмотр скрипта:</b>\n"
-    preview_text += formatted_preview
+    text += "<b>Команды:</b>\n"
+    text += "<code>/oplink [id]</code> - добавить создателя\n"
+    text += "<code>/stoplink [id]</code> - удалить создателя\n"
+    text += "<code>/creators</code> - список всех создателей"
     
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -611,249 +821,159 @@ async def process_script_upload(message: types.Message, state: FSMContext):
         ]
     )
     
-    await message.answer(preview_text, reply_markup=keyboard, parse_mode="HTML")
-    await state.clear()
-
-# ================== ОСТАЛЬНЫЕ АДМИН ФУНКЦИИ ==================
-
-@router.callback_query(F.data.startswith("admin_"))
-async def admin_callbacks(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
-
-    if callback.data == "admin_stats":
-        stats = get_statistics()
-        
-        stats_text = (
-            "📊 <b>Статистика бота</b>\n\n"
-            f"👥 Всего пользователей: <b>{stats['total_users']}</b>\n"
-            f"📜 Всего скриптов: <b>{stats['total_scripts']}</b>\n"
-            f"👤 Публичных скриптов: <b>{stats['public_scripts']}</b>\n"
-            f"👑 Загружено админом: <b>{stats['admin_scripts']}</b>\n"
-            f"👥 Загружено пользователями: <b>{stats['user_scripts']}</b>\n\n"
-            f"🔗 Используется SubGram: <b>✅ Да</b>\n"
-            f"👥 Группа: <b>{GROUP_ID}</b>\n"
-            f"📌 Топик: <b>{TOPIC_ID}</b>"
-        )
-        
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="back_to_admin")]
-            ]
-        )
-        
-        await callback.message.edit_text(stats_text, reply_markup=keyboard, parse_mode="HTML")
-
-    elif callback.data == "admin_broadcast":
-        await callback.message.edit_text(
-            "📢 <b>Начало рассылки</b>\n\n"
-            "Отправьте сообщение для рассылки:\n"
-            "• Текст\n"
-            "• Фото с подписью\n"
-            "• Видео с подписью\n"
-            "• Документ с подписью\n\n"
-            "После отправки контента вы сможете добавить URL-кнопки.",
-            parse_mode="HTML"
-        )
-        await state.set_state(BroadcastState.waiting_content)
-
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
-@router.callback_query(F.data == "back_to_admin")
-async def back_to_admin_callback(callback: types.CallbackQuery):
+# ================== РАССЫЛКА С КНОПКАМИ ==================
+
+@router.callback_query(F.data == "admin_broadcast")
+async def admin_broadcast_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Рассылка (только для главного админа)"""
     if callback.from_user.id != ADMIN_ID:
-        await callback.answer("⛔ Нет доступа", show_alert=True)
+        await callback.answer("⛔ Нет доступа к рассылке", show_alert=True)
         return
     
-    stats = get_statistics()
-    
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
-            [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
-            [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")],
-            [InlineKeyboardButton(text="👥 Публичные скрипты", callback_data="admin_public_scripts")]
-        ]
-    )
-    
-    admin_text = (
-        "👑 <b>Админ-панель</b>\n\n"
-        f"📊 <b>Статистика:</b>\n"
-        f"• 👥 Пользователей: {stats['total_users']}\n"
-        f"• 📜 Всего скриптов: {stats['total_scripts']}\n"
-        f"• 👤 Публичных: {stats['public_scripts']}\n"
-        f"• 👑 Админских: {stats['admin_scripts']}\n\n"
-        f"🔗 <b>Группа для скриптов:</b>\n"
-        f"ID: {GROUP_ID}\n"
-        f"Топик: {TOPIC_ID}"
-    )
-    
-    await callback.message.edit_text(admin_text, reply_markup=keyboard, parse_mode="HTML")
-
-# ================== ФУНКЦИИ РАССЫЛКИ ==================
-
-def parse_buttons(text: str) -> InlineKeyboardMarkup | None:
-    """Парсинг URL-кнопок из текста"""
-    if not text or text.lower().strip() == "нет":
-        return None
-    
-    keyboard = []
-    rows = text.strip().split('\n')
-    
-    for row in rows[:15]:  # Максимум 15 рядов
-        buttons = []
-        # Разделяем кнопки в ряду через |
-        button_parts = row.split('|')
-        
-        for part in button_parts[:8]:  # Максимум 8 кнопок в ряду
-            part = part.strip()
-            if '-' not in part:
-                continue
-            
-            # Разделяем на название и URL
-            name_url = part.split('-', 1)
-            if len(name_url) != 2:
-                continue
-            
-            name, url = name_url
-            name = name.strip()
-            url = url.strip()
-            
-            # Проверяем, что URL начинается с http:// или https://
-            if url and (url.startswith('http://') or url.startswith('https://')):
-                buttons.append(InlineKeyboardButton(text=name, url=url))
-        
-        if buttons:
-            keyboard.append(buttons)
-    
-    return InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
-
-@router.message(BroadcastState.waiting_content)
-async def broadcast_get_content(message: types.Message, state: FSMContext):
-    """Получение контента для рассылки"""
-    if message.from_user.id != ADMIN_ID:
-        await state.clear()
-        return
-    
-    # Сохраняем данные сообщения
-    content_data = {
-        'content_type': message.content_type,
-        'text': message.text,
-        'caption': message.caption,
-        'photo': message.photo[-1].file_id if message.photo else None,
-        'video': message.video.file_id if message.video else None,
-        'document': message.document.file_id if message.document else None,
-    }
-    
-    await state.update_data(content_data=content_data)
-    
-    await message.answer(
-        "⛓ <b>КНОПКИ: URL</b>\n\n"
-        "Отправьте боту список URL-кнопок в следующем формате:\n\n"
-        "<code>Кнопка 1 - http://link.com\n"
-        "Кнопка 2 - http://link.com</code>\n\n"
-        "Используйте разделитель « | », чтобы добавить до 8 кнопок в один ряд (допустимо 15 рядов):\n\n"
-        "<code>Кнопка 1 - http://link.com | Кнопка 2 - http://link.com</code>\n\n"
-        "Или напишите <b>нет</b> для рассылки без кнопок",
+    await callback.message.edit_text(
+        "📢 <b>Начало рассылки</b>\n\n"
+        "Отправьте сообщение для рассылки:\n"
+        "• Текст\n"
+        "• Фото с подписью\n"
+        "• Видео с подписью\n"
+        "• Документ с подписью\n\n"
+        "Просто отправьте сообщение следующим сообщением.\n\n"
+        "После этого вы сможете добавить кнопки.",
         parse_mode="HTML"
     )
     
-    await state.set_state(BroadcastState.waiting_buttons)
+    await state.set_state(BroadcastStates.waiting_for_message)
+    await callback.answer()
 
-@router.message(BroadcastState.waiting_buttons)
-async def broadcast_get_buttons(message: types.Message, state: FSMContext):
-    """Получение кнопок для рассылки"""
+@router.message(BroadcastStates.waiting_for_message)
+async def handle_broadcast_message(message: types.Message, state: FSMContext):
+    """Обработка сообщения для рассылки"""
     if message.from_user.id != ADMIN_ID:
-        await state.clear()
         return
     
-    keyboard = parse_buttons(message.text)
+    # Сохраняем данные сообщения
+    await state.update_data(
+        content_type=message.content_type,
+        text=message.text or message.caption or "",
+        photo=message.photo[-1].file_id if message.photo else None,
+        video=message.video.file_id if message.video else None,
+        document=message.document.file_id if message.document else None
+    )
     
-    await state.update_data(keyboard=keyboard)
+    await message.answer(
+        "✅ <b>Сообщение для рассылки принято!</b>\n\n"
+        "📝 <b>Что дальше:</b>\n"
+        "1. Если нужны кнопки - отправьте их в формате:\n\n"
+        "<code>Текст кнопки 1 - https://ссылка1.com</code>\n"
+        "<code>Текст кнопки 2 - https://ссылка2.com | Текст кнопки 3 - https://ссылка3.com</code>\n\n"
+        "<b>Формат:</b>\n"
+        "• Каждая строка - новый ряд кнопок\n"
+        "• Разделитель между кнопками в одном ряду - |\n"
+        "• Разделитель между текстом и ссылкой - -\n\n"
+        "<b>Пример:</b>\n"
+        "<code>Наш канал - https://t.me/script_f</code>\n"
+        "<code>Поддержка - https://t.me/secretlink | Донат - https://donate.com</code>\n\n"
+        "2. Чтобы начать рассылку без кнопок, отправьте: <code>/start_broadcast</code>\n"
+        "3. Чтобы отменить рассылку, отправьте: <code>/cancel</code>",
+        parse_mode="HTML"
+    )
     
-    # Получаем сохраненные данные
-    data = await state.get_data()
-    content_data = data.get('content_data', {})
+    await state.set_state(BroadcastStates.waiting_for_buttons)
+
+@router.message(BroadcastStates.waiting_for_buttons, Command("start_broadcast"))
+async def start_broadcast_without_buttons(message: types.Message, state: FSMContext):
+    """Начало рассылки без кнопок"""
+    if message.from_user.id != ADMIN_ID:
+        return
     
-    # Показываем предпросмотр
-    preview_text = "👁 <b>Предпросмотр рассылки:</b>\n\n"
+    user_data = await state.get_data()
     
-    if content_data['content_type'] == 'text':
-        text_preview = content_data['text'][:200] + "..." if content_data['text'] and len(content_data['text']) > 200 else content_data['text']
-        preview_text += f"📝 <b>Текст:</b>\n{text_preview}\n\n"
-    else:
-        preview_text += f"📷 <b>Тип:</b> {content_data['content_type']}\n"
-        if content_data['caption']:
-            caption_preview = content_data['caption'][:200] + "..." if len(content_data['caption']) > 200 else content_data['caption']
-            preview_text += f"📝 <b>Подпись:</b>\n{caption_preview}\n\n"
+    # Очищаем состояние
+    await state.clear()
+    
+    # Начинаем рассылку
+    await send_broadcast(message, user_data, None)
+
+@router.message(BroadcastStates.waiting_for_buttons, Command("cancel"))
+async def cancel_broadcast(message: types.Message, state: FSMContext):
+    """Отмена рассылки"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    await state.clear()
+    await message.answer("❌ Рассылка отменена")
+
+@router.message(BroadcastStates.waiting_for_buttons)
+async def handle_broadcast_buttons(message: types.Message, state: FSMContext):
+    """Обработка кнопок для рассылки"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    user_data = await state.get_data()
+    
+    if message.text:
+        # Парсим кнопки
+        buttons = parse_buttons(message.text)
+        
+        if buttons:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
         else:
-            preview_text += "📝 <b>Подпись:</b> (нет подписи)\n\n"
-    
-    preview_text += f"🔘 <b>Кнопки:</b> {'✅ Есть' if keyboard else '❌ Нет'}\n\n"
-    preview_text += "Отправить рассылку? Напишите <b>да</b> для подтверждения или <b>нет</b> для отмены."
-    
-    await message.answer(preview_text, parse_mode="HTML")
-    
-    await state.set_state(BroadcastState.waiting_confirmation)
+            keyboard = None
+        
+        # Очищаем состояние
+        await state.clear()
+        
+        # Начинаем рассылку
+        await send_broadcast(message, user_data, keyboard)
+    else:
+        await message.answer("❌ Отправьте текст с кнопками или команду /start_broadcast / /cancel")
 
-@router.message(BroadcastState.waiting_confirmation)
-async def broadcast_confirm(message: types.Message, state: FSMContext, bot: Bot):
-    """Подтверждение и отправка рассылки"""
-    if message.from_user.id != ADMIN_ID:
-        await state.clear()
-        return
-    
-    if message.text.lower() != 'да':
-        await message.answer("❌ Рассылка отменена")
-        await state.clear()
-        return
-    
-    # Получаем данные
-    data = await state.get_data()
-    content_data = data.get('content_data', {})
-    keyboard = data.get('keyboard')
-    
+async def send_broadcast(message: types.Message, broadcast_data: dict, keyboard: InlineKeyboardMarkup = None):
+    """Выполнение рассылки"""
     sent = 0
     failed = 0
     
-    # Отправляем всем пользователям
-    for user_id in USERS:
+    await message.answer(f"⏳ Начинаю рассылку для {len(USERS)} пользователей...")
+    
+    for user_id in list(USERS):
         try:
-            if content_data['content_type'] == 'text':
-                await bot.send_message(
+            if broadcast_data['content_type'] == 'text':
+                await message.bot.send_message(
                     chat_id=user_id,
-                    text=content_data['text'],
+                    text=broadcast_data['text'],
                     reply_markup=keyboard,
                     parse_mode="HTML"
                 )
-            elif content_data['content_type'] == 'photo':
-                await bot.send_photo(
+            elif broadcast_data['content_type'] == 'photo':
+                await message.bot.send_photo(
                     chat_id=user_id,
-                    photo=content_data['photo'],
-                    caption=content_data.get('caption'),
+                    photo=broadcast_data['photo'],
+                    caption=broadcast_data['text'],
                     reply_markup=keyboard,
                     parse_mode="HTML"
                 )
-            elif content_data['content_type'] == 'video':
-                await bot.send_video(
+            elif broadcast_data['content_type'] == 'video':
+                await message.bot.send_video(
                     chat_id=user_id,
-                    video=content_data['video'],
-                    caption=content_data.get('caption'),
+                    video=broadcast_data['video'],
+                    caption=broadcast_data['text'],
                     reply_markup=keyboard,
                     parse_mode="HTML"
                 )
-            elif content_data['content_type'] == 'document':
-                await bot.send_document(
+            elif broadcast_data['content_type'] == 'document':
+                await message.bot.send_document(
                     chat_id=user_id,
-                    document=content_data['document'],
-                    caption=content_data.get('caption'),
+                    document=broadcast_data['document'],
+                    caption=broadcast_data['text'],
                     reply_markup=keyboard,
                     parse_mode="HTML"
                 )
             
             sent += 1
-            await asyncio.sleep(0.05)  # Задержка между отправками
+            await asyncio.sleep(0.1)
             
         except Exception as e:
             failed += 1
@@ -869,19 +989,123 @@ async def broadcast_confirm(message: types.Message, state: FSMContext, bot: Bot)
     )
     
     await message.answer(result_text, parse_mode="HTML")
-    await state.clear()
 
-# ================== ОТМЕНА ==================
-
-@router.message(Command("cancel"))
-async def cancel_command(message: types.Message, state: FSMContext):
-    """Отмена текущего действия"""
-    current_state = await state.get_state()
-    if current_state is None:
+@router.callback_query(F.data == "back_to_admin")
+async def back_to_admin_callback(callback: types.CallbackQuery):
+    """Назад в админ-панель"""
+    if not (callback.from_user.id == ADMIN_ID or is_script_creator(callback.from_user.id)):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
         return
     
-    await state.clear()
-    await message.answer("❌ Действие отменено")
+    stats = get_statistics()
+    
+    if callback.from_user.id == ADMIN_ID:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+                [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+                [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")],
+                [InlineKeyboardButton(text="👥 Публичные скрипты", callback_data="admin_public_scripts")],
+                [InlineKeyboardButton(text="👑 Управление создателями", callback_data="admin_manage_creators")]
+            ]
+        )
+    else:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")]
+            ]
+        )
+    
+    admin_text = (
+        "👑 <b>Админ-панель</b>\n\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"• 👥 Пользователей: {stats['total_users']}\n"
+        f"• 📜 Всего скриптов: {stats['total_scripts']}\n"
+        f"• 👤 Публичных: {stats['public_scripts']}\n"
+        f"• 👑 Админских: {stats['admin_scripts']}\n"
+    )
+    
+    if callback.from_user.id == ADMIN_ID:
+        admin_text += f"• 👥 Создателей: {stats['active_creators']}\n"
+    
+    admin_text += f"\n>🔸<b>По вопросам:</b>\n"
+    admin_text += f"Бот: @SecretLiinkBot\n"
+    admin_text += f"Топик: {TOPIC_ID}"
+    
+    await callback.message.edit_text(admin_text, reply_markup=keyboard, parse_mode="HTML")
+
+# ================== ОБРАБОТКА ЗАГРУЗКИ СКРИПТА ==================
+
+@router.message(F.content_type.in_({'text', 'document'}))
+async def handle_script_upload(message: types.Message):
+    """Обработка загрузки скрипта"""
+    if message.chat.type != "private":
+        return
+    
+    # Проверяем, является ли пользователь админом или создателем
+    if not (message.from_user.id == ADMIN_ID or is_script_creator(message.from_user.id)):
+        if not message.text or not message.text.startswith('/'):
+            await message.answer(
+                "🤖 <b>Неизвестная команда, напишите /start</b>\n\n",
+                parse_mode="HTML"
+            )
+        return
+    
+    # Проверяем, что пользователь начал процесс загрузки скрипта
+    if message.from_user.id not in UPLOADING_USERS:
+        # Если пользователь не в процессе загрузки, просто игнорируем сообщение
+        return
+    
+    # Убираем пользователя из списка загрузки
+    UPLOADING_USERS.discard(message.from_user.id)
+    
+    # Получаем текст скрипта
+    script_content = ""
+    
+    if message.content_type == 'text':
+        script_content = message.text.strip()
+    elif message.content_type == 'document' and message.document:
+        try:
+            file = await message.bot.download(message.document)
+            content = file.read()
+            if isinstance(content, bytes):
+                script_content = content.decode('utf-8', errors='ignore')
+            else:
+                script_content = str(content)
+        except Exception as e:
+            await message.answer(f"❌ Не удалось прочитать файл: {str(e)}. Отправьте скрипт как текст.")
+            return
+    else:
+        await message.answer("❌ Отправьте скрипт в виде текста или текстового файла.")
+        return
+    
+    if not script_content or len(script_content.strip()) < 10:
+        await message.answer("❌ Скрипт не может быть пустым или слишком коротким (минимум 10 символов).")
+        return
+    
+    # Сохраняем скрипт в базу данных
+    unique_code = save_script_to_db(script_content, message.from_user.id)
+    
+    # Создаем ссылку
+    link = f"https://t.me/{BOT_USERNAME}?start={unique_code}"
+    
+    # Показываем результат
+    preview_text = "<b>✅ Скрипт загружен!</b>\n\n"
+    preview_text += f"<b>Уникальная ссылка:</b>\n<code>{link}</code>\n\n"
+    
+    script_preview = script_content[:200] + "..." if len(script_content) > 200 else script_content
+    formatted_preview = format_script_for_display(script_preview)
+    
+    preview_text += "<b>📝 Предпросмотр скрипта:</b>\n"
+    preview_text += formatted_preview
+    
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="back_to_admin")]
+        ]
+    )
+    
+    await message.answer(preview_text, reply_markup=keyboard, parse_mode="HTML")
 
 # ================== ОБРАБОТКА ДРУГИХ СООБЩЕНИЙ ==================
 
@@ -891,17 +1115,10 @@ async def handle_other_messages(message: types.Message):
     if message.chat.type != "private":
         return
     
-    # Если это не команда и не админ
     if not message.text or not message.text.startswith('/'):
-        if message.from_user.id != ADMIN_ID:
+        if message.from_user.id != ADMIN_ID and not is_script_creator(message.from_user.id):
             await message.answer(
-                "🤖 <b>Этот бот работает с уникальными ссылками на скрипты</b>\n\n"
-                "🔗 <b>Как получить скрипт:</b>\n"
-                "1. Отправьте свой скрипт в нашу группу\n"
-                "2. Бот автоматически создаст уникальную ссылку\n"
-                "3. Перейдите по ссылке для доступа к скрипту\n\n"
-                f"📢 <b>Наша группа:</b> https://t.me/c/{abs(GROUP_ID) - 1000000000000}/{TOPIC_ID}\n\n"
-                "Или используйте команду /start",
+                "🤖 <b>Неизвестная команда, напишите /start</b>\n\n",
                 parse_mode="HTML"
             )
 
@@ -909,12 +1126,11 @@ async def handle_other_messages(message: types.Message):
 
 async def main():
     bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher(storage=MemoryStorage())
+    storage = MemoryStorage()
+    dp = Dispatcher(storage=storage)
     dp.include_router(router)
     
-    # Добавляем бота в группу
     try:
-        # Попробуем получить информацию о боте
         me = await bot.get_me()
         logging.info(f"Бот запущен: @{me.username}")
         logging.info(f"ID группы для мониторинга: {GROUP_ID}")
