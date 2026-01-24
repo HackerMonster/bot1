@@ -17,7 +17,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 # ================== НАСТРОЙКИ ==================
 
-BOT_TOKEN = "8549573387:AAGJynndMV16Z_Rr0YgbnTd6nWahzkw221g"
+BOT_TOKEN = "8549573387:AAG6oAmjI-w8niZScnzNz42OX_5tiHnLw_k"
 SUBGRAM_API_KEY = "f5d4e6567b52e995ebf408cb75ac22740e25c9a02a0427941386c97e8843e891"
 SUBGRAM_URL = "https://api.subgram.org/get-sponsors"
 
