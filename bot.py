@@ -1127,7 +1127,10 @@ async def handle_script_upload(message: types.Message):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Загрузить еще один", callback_data="upload_script")],
-            [InlineKeyboardButton(text="📢 Поделиться ссылкой", url=f"https://t.me/share/url?url={link}&text=🎮+Скрипт+для+Roblox!+🔥+@script_f")],
+            [InlineKeyboardButton(text="📢 Поделиться ссылкой", url=f"https://t.me/share/url?url={link}&text=🎮+Топ-скрипт+для+Roblox+🔥%0A"
+        "Хочешь+больше+возможностей+в+игре%3F%0A"
+        "Лучшие+скрипты+уже+ждут+тебя!%0A"
+        "👉+Подписывайся:+@script_f")],
             [InlineKeyboardButton(text="🔥 Наш канал", url=CHANNEL_URL)]
         ]
     )
