@@ -7,7 +7,6 @@ import re
 import random
 import string
 from datetime import datetime
-from typing import List, Dict, Optional
 
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.filters import CommandStart, Command
@@ -26,6 +25,10 @@ CHANNEL_URL = "https://t.me/script_f"
 ADMIN_ID = 5870949629
 BOT_USERNAME = "LinksSecret_Bot"
 
+# Настройки для группы/топика
+GROUP_ID = -1001897612345  # Замените на ID вашей группы (должно быть отрицательным числом)
+TOPIC_ID = 2  # ID топика, где будут отправляться скрипты
+
 # ===============================================
 
 logging.basicConfig(level=logging.INFO)
@@ -35,396 +38,107 @@ router = Router()
 USERS = set()
 # Хранилище состояний загрузки скриптов
 UPLOADING_USERS = set()
+# Хранилище для специальных скриптов (ссылкой)
+SPECIAL_UPLOADING_USERS = set()
+# Хранилище для данных рассылки
+broadcast_data = {}
+broadcast_buttons = {}
 
-# Состояния для рассылки
+# FSM состояния для рассылки
 class BroadcastStates(StatesGroup):
     waiting_for_message = State()
     waiting_for_buttons = State()
 
-# ================== БАЗА ДАННЫХ ДЛЯ ОБЯЗАТЕЛЬНОЙ ПОДПИСКИ ==================
-
-def init_subscription_db():
-    """Инициализация базы данных для обязательной подписки"""
-    conn = sqlite3.connect('subscriptions.db')
-    cursor = conn.cursor()
-    
-    # Таблица для каналов обязательной подписки
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS required_channels (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        channel_id TEXT UNIQUE NOT NULL,
-        channel_username TEXT,
-        channel_title TEXT,
-        channel_url TEXT NOT NULL,
-        is_active BOOLEAN DEFAULT 1,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        added_by INTEGER,
-        priority INTEGER DEFAULT 0
-    )
-    ''')
-    
-    # Таблица для отслеживания подписок пользователей
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS user_subscriptions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        channel_id TEXT NOT NULL,
-        is_subscribed BOOLEAN DEFAULT 0,
-        last_check TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(user_id, channel_id)
-    )
-    ''')
-    
-    # Таблица для пользователей, которые прошли проверку
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS verified_users (
-        user_id INTEGER PRIMARY KEY,
-        verified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    conn.commit()
-    conn.close()
-    print("База данных подписок инициализирована")
-
-init_subscription_db()
-
-# ================== БАЗА ДАННЫХ ДЛЯ ССЫЛОК ==================
+# ================== БАЗА ДАННЫХ ДЛЯ ССЫЛОК И СОЗДАТЕЛЕЙ ==================
 
 def init_database():
-    """Инициализация базы данных для скриптов"""
-    conn = sqlite3.connect('scripts.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS scripts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        unique_code TEXT UNIQUE NOT NULL,
-        script_content TEXT NOT NULL,
-        created_by INTEGER,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        is_public BOOLEAN DEFAULT 0,
-        original_message_id INTEGER
-    )
-    ''')
-    
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS script_creators (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER UNIQUE NOT NULL,
-        username TEXT,
-        full_name TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        is_active BOOLEAN DEFAULT 1
-    )
-    ''')
-    
+    """Инициализация базы данных для скриптов и создателей"""
+    conn = None
     try:
-        cursor.execute('INSERT OR IGNORE INTO script_creators (user_id, username, full_name) VALUES (?, ?, ?)',
-                      (ADMIN_ID, 'admin', 'Главный Администратор'))
-    except:
-        pass
-    
-    conn.commit()
-    conn.close()
-    print("База данных скриптов инициализирована")
+        if os.path.exists('scripts.db'):
+            try:
+                conn = sqlite3.connect('scripts.db')
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(scripts)")
+                columns = [col[1] for col in cursor.fetchall()]
+                
+                # Проверяем наличие нужных столбцов
+                needed_columns = ['is_special', 'link_url']
+                columns_to_add = []
+                
+                for column in needed_columns:
+                    if column not in columns:
+                        columns_to_add.append(column)
+                
+                if columns_to_add:
+                    print(f"Добавляем отсутствующие столбцы: {columns_to_add}")
+                    for column in columns_to_add:
+                        if column == 'is_special':
+                            cursor.execute('ALTER TABLE scripts ADD COLUMN is_special BOOLEAN DEFAULT 0')
+                        elif column == 'link_url':
+                            cursor.execute('ALTER TABLE scripts ADD COLUMN link_url TEXT DEFAULT NULL')
+                    conn.commit()
+                    print("База данных обновлена с новыми полями")
+                else:
+                    print("База данных в порядке")
+                    
+            except Exception as e:
+                print(f"Ошибка при проверке базы данных: {e}")
+                if conn:
+                    conn.close()
+                if os.path.exists('scripts.db'):
+                    os.remove('scripts.db')
+                conn = sqlite3.connect('scripts.db')
+                cursor = conn.cursor()
+        else:
+            conn = sqlite3.connect('scripts.db')
+            cursor = conn.cursor()
+        
+        # Создаем таблицы если их нет
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS scripts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            unique_code TEXT UNIQUE NOT NULL,
+            script_content TEXT NOT NULL,
+            created_by INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_public BOOLEAN DEFAULT 0,
+            is_special BOOLEAN DEFAULT 0,
+            link_url TEXT DEFAULT NULL,
+            original_message_id INTEGER
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS script_creators (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER UNIQUE NOT NULL,
+            username TEXT,
+            full_name TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_active BOOLEAN DEFAULT 1
+        )
+        ''')
+        
+        # Добавляем админа если его нет
+        cursor.execute('SELECT 1 FROM script_creators WHERE user_id = ?', (ADMIN_ID,))
+        if not cursor.fetchone():
+            cursor.execute('INSERT OR IGNORE INTO script_creators (user_id, username, full_name) VALUES (?, ?, ?)',
+                          (ADMIN_ID, 'admin', 'Главный Администратор'))
+        
+        conn.commit()
+        print("База данных инициализирована")
+        
+    except Exception as e:
+        print(f"Критическая ошибка при инициализации базы данных: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 init_database()
 
-# ================== ФУНКЦИИ ДЛЯ РАБОТЫ С ОБЯЗАТЕЛЬНОЙ ПОДПИСКОЙ ==================
-
-def add_required_channel(channel_url: str, added_by: int, channel_id: str = None, channel_username: str = None, channel_title: str = None) -> bool:
-    """Добавление канала в обязательную подписку"""
-    conn = sqlite3.connect('subscriptions.db')
-    cursor = conn.cursor()
-    
-    try:
-        # Извлекаем ID канала из ссылки, если не указан
-        if not channel_id and channel_url:
-            # Пытаемся извлечь username или ID из ссылки
-            match = re.search(r't\.me/([a-zA-Z0-9_\-]+)', channel_url)
-            if match:
-                channel_username_or_id = match.group(1)
-                if channel_username_or_id.startswith('-100'):
-                    channel_id = channel_username_or_id
-                else:
-                    channel_id = f"@{channel_username_or_id}"
-                    channel_username = channel_username_or_id
-        
-        cursor.execute('''
-        INSERT OR REPLACE INTO required_channels 
-        (channel_id, channel_username, channel_title, channel_url, is_active, added_by)
-        VALUES (?, ?, ?, ?, 1, ?)
-        ''', (channel_id, channel_username, channel_title, channel_url, added_by))
-        
-        conn.commit()
-        return True
-    except Exception as e:
-        logging.error(f"Error adding required channel: {e}")
-        return False
-    finally:
-        conn.close()
-
-def remove_required_channel(channel_url: str) -> bool:
-    """Удаление канала из обязательной подписки"""
-    conn = sqlite3.connect('subscriptions.db')
-    cursor = conn.cursor()
-    
-    try:
-        cursor.execute('DELETE FROM required_channels WHERE channel_url = ?', (channel_url,))
-        conn.commit()
-        return cursor.rowcount > 0
-    except Exception as e:
-        logging.error(f"Error removing required channel: {e}")
-        return False
-    finally:
-        conn.close()
-
-def get_all_active_channels() -> List[Dict]:
-    """Получение всех активных каналов для подписки"""
-    conn = sqlite3.connect('subscriptions.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    SELECT channel_id, channel_username, channel_title, channel_url 
-    FROM required_channels 
-    WHERE is_active = 1 
-    ORDER BY priority DESC, created_at
-    ''')
-    
-    channels = []
-    for row in cursor.fetchall():
-        channels.append({
-            'channel_id': row[0],
-            'channel_username': row[1],
-            'channel_title': row[2],
-            'channel_url': row[3]
-        })
-    
-    conn.close()
-    return channels
-
-def get_user_subscription_status(user_id: int, channel_id: str) -> bool:
-    """Проверка подписки пользователя на конкретный канал"""
-    conn = sqlite3.connect('subscriptions.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    SELECT is_subscribed FROM user_subscriptions 
-    WHERE user_id = ? AND channel_id = ?
-    ''', (user_id, channel_id))
-    
-    result = cursor.fetchone()
-    conn.close()
-    
-    return result[0] if result else False
-
-def update_user_subscription(user_id: int, channel_id: str, is_subscribed: bool):
-    """Обновление статуса подписки пользователя"""
-    conn = sqlite3.connect('subscriptions.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    INSERT OR REPLACE INTO user_subscriptions (user_id, channel_id, is_subscribed, last_check)
-    VALUES (?, ?, ?, datetime('now'))
-    ''', (user_id, channel_id, 1 if is_subscribed else 0))
-    
-    conn.commit()
-    conn.close()
-
-def mark_user_as_verified(user_id: int):
-    """Отметка пользователя как прошедшего проверку подписки"""
-    conn = sqlite3.connect('subscriptions.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    INSERT OR REPLACE INTO verified_users (user_id, verified_at)
-    VALUES (?, datetime('now'))
-    ''', (user_id,))
-    
-    conn.commit()
-    conn.close()
-
-def is_user_verified(user_id: int) -> bool:
-    """Проверка, прошел ли пользователь проверку подписки"""
-    conn = sqlite3.connect('subscriptions.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('SELECT 1 FROM verified_users WHERE user_id = ?', (user_id,))
-    result = cursor.fetchone()
-    
-    conn.close()
-    return result is not None
-
-def get_unsubscribed_channels_for_user(user_id: int) -> List[Dict]:
-    """
-    Получение каналов, на которые пользователь не подписан
-    ВСЕГДА проверяет актуальный статус подписки
-    """
-    all_channels = get_all_active_channels()
-    unsubscribed = []
-    
-    # Получаем текущий статус подписки из базы
-    conn = sqlite3.connect('subscriptions.db')
-    cursor = conn.cursor()
-    
-    for channel in all_channels:
-        cursor.execute('''
-        SELECT is_subscribed FROM user_subscriptions 
-        WHERE user_id = ? AND channel_id = ?
-        ''', (user_id, channel['channel_id']))
-        
-        result = cursor.fetchone()
-        # Если нет записи или подписка = 0 (False), добавляем в список
-        if not result or not result[0]:
-            unsubscribed.append(channel)
-    
-    conn.close()
-    return unsubscribed
-
-def clear_user_subscriptions(user_id: int):
-    """Очистка истории подписок пользователя"""
-    conn = sqlite3.connect('subscriptions.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('DELETE FROM user_subscriptions WHERE user_id = ?', (user_id,))
-    cursor.execute('DELETE FROM verified_users WHERE user_id = ?', (user_id,))
-    
-    conn.commit()
-    conn.close()
-
-# ================== ФУНКЦИИ ПРОВЕРКИ ПОДПИСКИ ==================
-
-async def check_channel_subscription(bot: Bot, user_id: int, channel_id: str) -> bool:
-    """
-    Проверка подписки пользователя на канал
-    Бот должен быть администратором в канале!
-    """
-    try:
-        # Если channel_id начинается с @, используем username
-        if channel_id.startswith('@'):
-            chat_member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-            return chat_member.status in ['member', 'administrator', 'creator']
-        
-        # Если это числовой ID (может быть отрицательным для каналов/супергрупп)
-        try:
-            chat_id = int(channel_id)
-            chat_member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-            return chat_member.status in ['member', 'administrator', 'creator']
-        except ValueError:
-            # Если не удалось преобразовать в число, пробуем как username без @
-            chat_member = await bot.get_chat_member(chat_id=f"@{channel_id}", user_id=user_id)
-            return chat_member.status in ['member', 'administrator', 'creator']
-            
-    except Exception as e:
-        logging.error(f"Error checking subscription for user {user_id} in channel {channel_id}: {e}")
-        return False
-
-async def check_all_subscriptions_and_update(bot: Bot, user_id: int) -> Dict[str, bool]:
-    """
-    Проверка подписки на все обязательные каналы и обновление статуса
-    ВСЕГДА делает актуальную проверку
-    """
-    channels = get_all_active_channels()
-    results = {}
-    
-    for channel in channels:
-        # ВСЕГДА делаем актуальную проверку
-        is_subscribed = await check_channel_subscription(bot, user_id, channel['channel_id'])
-        results[channel['channel_id']] = is_subscribed
-        # Обновляем статус в базе данных
-        update_user_subscription(user_id, channel['channel_id'], is_subscribed)
-    
-    # Если все подписки есть, отмечаем пользователя как верифицированного
-    if all(results.values()) and results:
-        mark_user_as_verified(user_id)
-    else:
-        # Если не подписан на все, удаляем из верифицированных
-        conn = sqlite3.connect('subscriptions.db')
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM verified_users WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-    
-    return results
-
-def create_subscription_keyboard(unsubscribed_channels: List[Dict]) -> InlineKeyboardMarkup:
-    """
-    Создание клавиатуры для подписки на каналы
-    До 10 кнопок в ряд для SubGram спонсоров
-    """
-    keyboard = []
-    
-    if not unsubscribed_channels:
-        return None
-    
-    # Определяем количество кнопок в ряду (максимум 10)
-    buttons_per_row = 10 if len(unsubscribed_channels) > 10 else 3 if len(unsubscribed_channels) > 3 else len(unsubscribed_channels)
-    
-    # Создаем ряды с нужным количеством кнопок
-    for i in range(0, len(unsubscribed_channels), buttons_per_row):
-        row = []
-        # Добавляем кнопки в текущий ряд
-        for j in range(buttons_per_row):
-            if i + j < len(unsubscribed_channels):
-                channel = unsubscribed_channels[i + j]
-                button_text = f"➕ Подписаться"
-                row.append(InlineKeyboardButton(
-                    text=button_text,
-                    url=channel['channel_url']
-                ))
-        
-        if row:
-            keyboard.append(row)
-    
-    # Добавляем кнопку проверки подписки
-    keyboard.append([InlineKeyboardButton(
-        text="🔄 Проверить подписку",
-        callback_data="check_subscription"
-    )])
-    
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-# ================== ФУНКЦИИ ДЛЯ РАБОТЫ С БД СКРИПТОВ ==================
-
-def generate_unique_code():
-    """Генерация уникального кода для ссылки"""
-    length = random.randint(7, 25)
-    characters = string.ascii_letters + string.digits + "-"
-    code = ''.join(random.choice(characters) for _ in range(length))
-    return code
-
-def save_script_to_db(script_content: str, created_by: int, is_public=True, original_message_id=None):
-    """Сохранение скрипта в базу данных"""
-    conn = sqlite3.connect('scripts.db')
-    cursor = conn.cursor()
-    
-    while True:
-        unique_code = generate_unique_code()
-        cursor.execute('SELECT 1 FROM scripts WHERE unique_code = ?', (unique_code,))
-        if not cursor.fetchone():
-            break
-    
-    cursor.execute('''
-    INSERT INTO scripts (unique_code, script_content, created_by, is_public, original_message_id, created_at)
-    VALUES (?, ?, ?, ?, ?, datetime('now'))
-    ''', (unique_code, script_content, created_by, 1 if is_public else 0, original_message_id))
-    
-    conn.commit()
-    conn.close()
-    
-    return unique_code
-
-def get_script_content(unique_code):
-    """Получение скрипта по уникальному коду"""
-    conn = sqlite3.connect('scripts.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('SELECT script_content FROM scripts WHERE unique_code = ?', (unique_code,))
-    result = cursor.fetchone()
-    conn.close()
-    
-    return result[0] if result else None
+# ================== ФУНКЦИИ ДЛЯ РАБОТЫ С СОЗДАТЕЛЯМИ ==================
 
 def is_script_creator(user_id: int) -> bool:
     """Проверяет, является ли пользователь создателем скриптов"""
@@ -440,6 +154,112 @@ def is_script_creator(user_id: int) -> bool:
     conn.close()
     
     return result is not None
+
+def add_script_creator(user_id: int, username: str = None, full_name: str = None) -> bool:
+    """Добавляет пользователя в создатели скриптов"""
+    conn = sqlite3.connect('scripts.db')
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+        INSERT OR REPLACE INTO script_creators (user_id, username, full_name, is_active)
+        VALUES (?, ?, ?, 1)
+        ''', (user_id, username, full_name))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logging.error(f"Error adding script creator: {e}")
+        conn.close()
+        return False
+
+def remove_script_creator(user_id: int) -> bool:
+    """Удаляет пользователя из создателей скриптов"""
+    conn = sqlite3.connect('scripts.db')
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('DELETE FROM script_creators WHERE user_id = ?', (user_id,))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logging.error(f"Error removing script creator: {e}")
+        conn.close()
+        return False
+
+def get_all_script_creators():
+    """Получает список всех создателей скриптов"""
+    conn = sqlite3.connect('scripts.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    SELECT user_id, username, full_name, created_at, is_active 
+    FROM script_creators 
+    ORDER BY created_at DESC
+    ''')
+    
+    creators = cursor.fetchall()
+    conn.close()
+    
+    return creators
+
+# ================== ФУНКЦИИ ДЛЯ РАБОТЫ С БД ==================
+
+def generate_unique_code():
+    """Генерация уникального кода для ссылки от 7 до 25 символов"""
+    length = random.randint(7, 25)
+    characters = string.ascii_letters + string.digits + "-"
+    code = ''.join(random.choice(characters) for _ in range(length))
+    return code
+
+def save_script_to_db(script_content: str, created_by: int, is_public=True, is_special=False, link_url=None, original_message_id=None):
+    """Сохранение скрипта в базу данных и возврат уникального кода"""
+    conn = sqlite3.connect('scripts.db')
+    cursor = conn.cursor()
+    
+    while True:
+        unique_code = generate_unique_code()
+        cursor.execute('SELECT 1 FROM scripts WHERE unique_code = ?', (unique_code,))
+        if not cursor.fetchone():
+            break
+    
+    # Для специальных скриптов (ссылкой) используем фиксированный текст
+    if is_special:
+        # Сохраняем текст как на второй фотографии
+        script_content = "<b>Ваш скрипт ⬇️</b>"
+    
+    cursor.execute('''
+    INSERT INTO scripts (unique_code, script_content, created_by, is_public, is_special, link_url, original_message_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    ''', (unique_code, script_content, created_by, 1 if is_public else 0, 1 if is_special else 0, link_url, original_message_id))
+    
+    conn.commit()
+    conn.close()
+    
+    return unique_code
+
+def get_script_content(unique_code):
+    """Получение скрипта по уникальному коду"""
+    conn = sqlite3.connect('scripts.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    SELECT script_content, is_special, link_url FROM scripts WHERE unique_code = ?
+    ''', (unique_code,))
+    
+    result = cursor.fetchone()
+    conn.close()
+    
+    if result:
+        return {
+            'content': result[0],
+            'is_special': result[1],
+            'link_url': result[2]
+        }
+    return None
 
 def get_statistics():
     """Получение статистики"""
@@ -459,13 +279,19 @@ def get_statistics():
         cursor.execute("SELECT COUNT(*) FROM scripts WHERE is_public = 1")
         public_scripts = cursor.fetchone()[0]
         
+        cursor.execute("SELECT COUNT(*) FROM scripts WHERE is_special = 1")
+        special_scripts = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM script_creators")
+        total_creators = cursor.fetchone()[0]
+        
         cursor.execute("SELECT COUNT(*) FROM script_creators WHERE is_active = 1")
         active_creators = cursor.fetchone()[0]
         
     except Exception as e:
         logging.error(f"Ошибка при получении статистики: {e}")
-        total_scripts = admin_scripts = user_scripts = public_scripts = 0
-        active_creators = 0
+        total_scripts = admin_scripts = user_scripts = public_scripts = special_scripts = 0
+        total_creators = active_creators = 0
     
     conn.close()
     
@@ -474,14 +300,15 @@ def get_statistics():
         'admin_scripts': admin_scripts,
         'user_scripts': user_scripts,
         'public_scripts': public_scripts,
+        'special_scripts': special_scripts,
         'total_users': len(USERS),
+        'total_creators': total_creators,
         'active_creators': active_creators
     }
 
 # ================== SubGram ФУНКЦИИ ==================
 
 async def get_subgram_sponsors(user_id: int, chat_id: int) -> dict | None:
-    """Получение спонсоров из SubGram"""
     headers = {"Auth": SUBGRAM_API_KEY}
     payload = {"user_id": user_id, "chat_id": chat_id}
 
@@ -498,421 +325,99 @@ async def get_subgram_sponsors(user_id: int, chat_id: int) -> dict | None:
                 else:
                     logging.error(f"SubGram API error: {response.status}")
                     return None
+    except asyncio.TimeoutError:
+        logging.error("SubGram API timeout")
+        return None
     except Exception as e:
         logging.error(f"SubGram API error: {e}")
         return None
 
-# ================== ФУНКЦИИ ДЛЯ РАССЫЛКИ ==================
-
-def parse_broadcast_buttons(buttons_text: str) -> Optional[List[List[InlineKeyboardButton]]]:
-    """
-    Парсинг URL-кнопок для рассылки
-    Формат: Кнопка 1 — http://link.com | Кнопка 2 — http://link.com
-    """
-    if not buttons_text.strip():
-        return None
-    
-    rows = buttons_text.strip().split('\n')
+def create_subscription_keyboard(sponsors_data):
+    """Создание клавиатуры с каналами для подписки"""
+    sponsors = sponsors_data.get("sponsors", [])
     keyboard = []
+    
+    for sponsor in sponsors:
+        button = InlineKeyboardButton(
+            text=sponsor.get("name", "Канал"),
+            url=sponsor.get("url", "#")
+        )
+        keyboard.append([button])
+    
+    keyboard.append([InlineKeyboardButton(
+        text="✅ Проверить подписку",
+        callback_data="check_subscription"
+    )])
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# ================== ФУНКЦИИ ФОРМАТИРОВАНИЯ ==================
+
+def format_script_for_display(script_content: str) -> str:
+    """Форматирование скрипта для отображения"""
+    if not script_content:
+        return ""
+    
+    if not script_content.startswith('$'):
+        script_content = f"${script_content}"
+    
+    script_content = script_content.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
+    lines = script_content.split('\n')
+    formatted_lines = []
+    
+    for line in lines:
+        if line.startswith('$'):
+            code_content = line[1:].strip()
+            if code_content:
+                formatted_lines.append(f"<code>{code_content}</code>")
+            else:
+                formatted_lines.append(line)
+        else:
+            if '$' in line:
+                line = re.sub(r'\$([^$\n]+)\$', r'<code>\1</code>', line)
+            formatted_lines.append(line)
+    
+    return '\n'.join(formatted_lines)
+
+def parse_buttons(buttons_text: str):
+    """Парсинг кнопок из текста"""
+    buttons = []
+    
+    # Разделяем ряды кнопок
+    rows = buttons_text.strip().split('\n')
     
     for row in rows:
         row_buttons = []
-        # Разделяем кнопки в ряду по разделителю "|"
-        button_strings = [btn.strip() for btn in row.split('|') if btn.strip()]
+        # Разделяем кнопки в ряду
+        button_pairs = [btn.strip() for btn in row.split('|') if btn.strip()]
         
-        for button_str in button_strings:
-            # Разделяем текст и ссылку по разделителю "—"
-            if '—' in button_str:
-                parts = button_str.split('—', 1)
+        for button_pair in button_pairs:
+            if '-' in button_pair:
+                parts = button_pair.split('-', 1)
                 if len(parts) == 2:
                     text = parts[0].strip()
                     url = parts[1].strip()
-                    
-                    # Проверяем, что URL начинается с http/https
-                    if text and url and (url.startswith('http://') or url.startswith('https://')):
+                    if text and url and url.startswith('http'):
                         row_buttons.append(InlineKeyboardButton(text=text, url=url))
-                    else:
-                        logging.warning(f"Некорректная кнопка: {button_str}")
         
         if row_buttons:
-            keyboard.append(row_buttons)
-        
-        # Максимум 15 рядов
-        if len(keyboard) >= 15:
-            break
+            buttons.append(row_buttons)
     
-    return keyboard if keyboard else None
+    return buttons
 
-async def send_broadcast_to_user(bot: Bot, user_id: int, message_data: dict, keyboard_markup: Optional[InlineKeyboardMarkup] = None):
-    """Отправка сообщения рассылки конкретному пользователю"""
-    try:
-        content_type = message_data.get('content_type', 'text')
-        
-        if content_type == 'text':
-            await bot.send_message(
-                chat_id=user_id,
-                text=message_data.get('text', ''),
-                reply_markup=keyboard_markup,
-                parse_mode="HTML",
-                disable_web_page_preview=True
-            )
-            
-        elif content_type == 'photo':
-            await bot.send_photo(
-                chat_id=user_id,
-                photo=message_data.get('photo'),
-                caption=message_data.get('text', ''),
-                reply_markup=keyboard_markup,
-                parse_mode="HTML"
-            )
-            
-        elif content_type == 'video':
-            await bot.send_video(
-                chat_id=user_id,
-                video=message_data.get('video'),
-                caption=message_data.get('text', ''),
-                reply_markup=keyboard_markup,
-                parse_mode="HTML"
-            )
-            
-        elif content_type == 'document':
-            await bot.send_document(
-                chat_id=user_id,
-                document=message_data.get('document'),
-                caption=message_data.get('text', ''),
-                reply_markup=keyboard_markup,
-                parse_mode="HTML"
-            )
-        
-        return True
-    except Exception as e:
-        logging.error(f"Ошибка при отправке рассылки пользователю {user_id}: {e}")
-        return False
-
-# ================== ОБРАБОТКА КОМАНД АДМИНИСТРИРОВАНИЯ ==================
-
-@router.message(Command("op"))
-async def enable_channel_command(message: types.Message):
-    """Включение обязательной подписки на канал"""
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ У вас нет прав для выполнения этой команды")
-        return
-    
-    args = message.text.split()
-    if len(args) < 2:
-        await message.answer(
-            "❌ <b>Использование:</b> /op [ссылка на канал]\n\n"
-            "<b>Пример:</b>\n"
-            "<code>/op https://t.me/script_f</code>\n\n"
-            "Бот должен быть администратором в канале!",
-            parse_mode="HTML"
-        )
-        return
-    
-    channel_url = args[1]
-    
-    # Проверяем формат ссылки
-    if not channel_url.startswith('https://t.me/'):
-        await message.answer("❌ Неверный формат ссылки. Используйте https://t.me/username")
-        return
-    
-    try:
-        # Получаем информацию о канале
-        bot = message.bot
-        channel_username = channel_url.replace('https://t.me/', '').strip('/')
-        
-        try:
-            chat = await bot.get_chat(f"@{channel_username}")
-            channel_id = f"@{channel_username}"
-            channel_title = chat.title
-        except:
-            await message.answer("❌ Не удалось получить информацию о канале. Убедитесь, что бот добавлен в канал как администратор!")
-            return
-        
-        # Добавляем канал в обязательную подписку
-        if add_required_channel(
-            channel_url=channel_url,
-            added_by=message.from_user.id,
-            channel_id=channel_id,
-            channel_username=channel_username,
-            channel_title=channel_title
-        ):
-            await message.answer(
-                f"✅ <b>Канал добавлен в обязательную подписку!</b>\n\n"
-                f"📢 <b>Название:</b> {channel_title}\n"
-                f"🔗 <b>Ссылка:</b> {channel_url}\n"
-                f"👤 <b>Username:</b> @{channel_username}\n\n"
-                f"Теперь все пользователи должны подписаться на этот канал, чтобы получить скрипты.",
-                parse_mode="HTML"
-            )
-        else:
-            await message.answer("❌ Не удалось добавить канал. Возможно, он уже добавлен.")
-            
-    except Exception as e:
-        logging.error(f"Error adding channel: {e}")
-        await message.answer(f"❌ Ошибка при добавлении канала: {str(e)}")
-
-@router.message(Command("stop"))
-async def disable_channel_command(message: types.Message):
-    """Отключение обязательной подписки на канал"""
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ У вас нет прав для выполнения этой команды")
-        return
-    
-    args = message.text.split()
-    if len(args) < 2:
-        await message.answer(
-            "❌ <b>Использование:</b> /stop [ссылка на канал]\n\n"
-            "<b>Пример:</b>\n"
-            "<code>/stop https://t.me/script_f</code>",
-            parse_mode="HTML"
-        )
-        return
-    
-    channel_url = args[1]
-    
-    if remove_required_channel(channel_url):
-        await message.answer(
-            f"✅ <b>Канал удален из обязательной подписки!</b>\n\n"
-            f"🔗 <b>Ссылка:</b> {channel_url}\n\n"
-            f"Теперь пользователям не требуется подписываться на этот канал.",
-            parse_mode="HTML"
-        )
-    else:
-        await message.answer("❌ Канал не найден в списке обязательной подписки")
-
-@router.message(Command("eop"))
-async def list_channels_command(message: types.Message):
-    """Показать список каналов обязательной подписки"""
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ У вас нет прав для выполнения этой команды")
-        return
-    
-    channels = get_all_active_channels()
-    
-    if not channels:
-        await message.answer("📭 <b>Список каналов обязательной подписки пуст</b>", parse_mode="HTML")
-        return
-    
-    text = "<b>📢 Список каналов обязательной подписки:</b>\n\n"
-    
-    for i, channel in enumerate(channels, 1):
-        text += f"{i}. <b>{channel.get('channel_title', 'Без названия')}</b>\n"
-        text += f"   🔗 <b>Ссылка:</b> {channel['channel_url']}\n"
-        if channel.get('channel_username'):
-            text += f"   👤 <b>Username:</b> @{channel['channel_username']}\n"
-        text += f"   🆔 <b>ID:</b> {channel['channel_id']}\n\n"
-    
-    text += f"<b>Всего каналов:</b> {len(channels)}\n"
-    text += "<b>Команды для управления:</b>\n"
-    text += "/op [ссылка] - добавить канал\n"
-    text += "/stop [ссылка] - удалить канал"
-    
-    await message.answer(text, parse_mode="HTML")
-
-# ================== ОСНОВНАЯ ЛОГИКА ПРОВЕРКИ ПОДПИСКИ ==================
-
-async def check_subscriptions_and_respond(bot: Bot, user_id: int, chat_id: int, unique_code: str = None, message: types.Message = None, force_check: bool = False):
-    """
-    Основная функция проверки подписок и отправки соответствующего сообщения
-    force_check: если True, всегда проверяет актуальный статус подписки
-    """
-    # Сначала проверяем SubGram
-    subgram_response = await get_subgram_sponsors(user_id, chat_id)
-    
-    if subgram_response and subgram_response.get("status") == "warning":
-        # Если есть требования от SubGram, показываем их
-        sponsors = subgram_response.get("sponsors", [])
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-        
-        # Добавляем кнопки для спонсоров (до 10 в ряд)
-        buttons_per_row = 10 if len(sponsors) > 10 else 3 if len(sponsors) > 3 else len(sponsors)
-        
-        for i in range(0, len(sponsors), buttons_per_row):
-            row = []
-            for j in range(buttons_per_row):
-                if i + j < len(sponsors):
-                    sponsor = sponsors[i + j]
-                    row.append(InlineKeyboardButton(
-                        text=sponsor.get("name", "Канал"),
-                        url=sponsor.get("url", "#")
-                    ))
-            if row:
-                keyboard.inline_keyboard.append(row)
-        
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(
-                text="🔄 Проверить подписку",
-                callback_data="check_subscription"
-            )
-        ])
-        
-        warning_message = (
-            "✅ SubGram подписки подтверждены!\n\n"
-            "ℹ️ Теперь подпишитесь на наших спонсоров\n"
-            "❕ Подпишитесь и нажмите \"🔄 Проверить подписку\"."
-        )
-        
-        if message:
-            await message.answer(warning_message, reply_markup=keyboard, parse_mode="HTML")
-        else:
-            await bot.send_message(chat_id, warning_message, reply_markup=keyboard, parse_mode="HTML")
-        return False
-    
-    # ВСЕГДА проверяем актуальный статус подписок при переходе по ссылке
-    if unique_code or force_check:
-        # При переходе по ссылке или принудительной проверке делаем актуальную проверку
-        await check_all_subscriptions_and_update(bot, user_id)
-    
-    # Получаем неподписанные каналы (с актуальными данными)
-    unsubscribed_channels = get_unsubscribed_channels_for_user(user_id)
-    
-    if unsubscribed_channels:
-        # Если пользователь еще не подписался на все каналы
-        keyboard = create_subscription_keyboard(unsubscribed_channels)
-        
-        warning_message = (
-            "✅ SubGram подписки подтверждены!\n\n"
-            "ℹ️ Теперь подпишитесь на наших спонсоров\n"
-            "❕ Подпишитесь и нажмите \"🔄 Проверить подписку\"."
-        )
-        
-        if message:
-            await message.answer(warning_message, reply_markup=keyboard, parse_mode="HTML")
-        else:
-            await bot.send_message(chat_id, warning_message, reply_markup=keyboard, parse_mode="HTML")
-        return False
-    
-    # Если все проверки пройдены
-    return True
-
-# ================== ОБРАБОТКА КОМАНДЫ /start ==================
-
-@router.message(CommandStart())
-async def start_handler(message: types.Message):
-    """Обработка команды /start"""
-    if message.chat.type != "private":
-        return
-    
-    USERS.add(message.from_user.id)
-    
-    # Проверяем, есть ли уникальный код в ссылке
-    if len(message.text.split()) > 1:
-        unique_code = message.text.split()[1]
-        
-        # ПРИ ПЕРЕХОДЕ ПО ССЫЛКЕ ВСЕГДА ДЕЛАЕМ АКТУАЛЬНУЮ ПРОВЕРКУ
-        all_subscribed = await check_subscriptions_and_respond(
-            bot=message.bot,
-            user_id=message.from_user.id,
-            chat_id=message.chat.id,
-            unique_code=unique_code,
-            message=message,
-            force_check=True  # ВСЕГДА проверяем актуальный статус!
-        )
-        
-        if not all_subscribed:
-            return
-        
-        # Если все подписки есть, показываем скрипт
-        script_content = get_script_content(unique_code)
-        
-        if script_content:
-            await show_script_content(message, script_content)
-        else:
-            await message.answer("❌ Ссылка не найдена или устарела")
-        return
-    
-    # Если нет уникального кода, проверяем подписки (тоже с актуальной проверкой)
-    all_subscribed = await check_subscriptions_and_respond(
-        bot=message.bot,
-        user_id=message.from_user.id,
-        chat_id=message.chat.id,
-        message=message,
-        force_check=True
-    )
-    
-    if all_subscribed:
-        # Если все подписки есть, показываем приветствие
-        await send_welcome(message)
-
-@router.callback_query(F.data == "check_subscription")
-async def check_subscription_callback(callback: types.CallbackQuery):
-    """Обработка нажатия кнопки проверки подписки"""
-    await callback.answer("⏳ Проверяем подписку...")
-    
-    user_id = callback.from_user.id
-    chat_id = callback.message.chat.id
-    
-    # Удаляем старое сообщение
-    try:
-        await callback.message.delete()
-    except:
-        pass
-    
-    # Проверяем SubGram
-    subgram_response = await get_subgram_sponsors(user_id, chat_id)
-    
-    if subgram_response and subgram_response.get("status") == "warning":
-        # Обновляем кнопки SubGram
-        sponsors = subgram_response.get("sponsors", [])
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-        
-        # Добавляем кнопки для спонсоров (до 10 в ряд)
-        buttons_per_row = 10 if len(sponsors) > 10 else 3 if len(sponsors) > 3 else len(sponsors)
-        
-        for i in range(0, len(sponsors), buttons_per_row):
-            row = []
-            for j in range(buttons_per_row):
-                if i + j < len(sponsors):
-                    sponsor = sponsors[i + j]
-                    row.append(InlineKeyboardButton(
-                        text=sponsor.get("name", "Канал"),
-                        url=sponsor.get("url", "#")
-                    ))
-            if row:
-                keyboard.inline_keyboard.append(row)
-        
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(
-                text="🔄 Проверить подписку",
-                callback_data="check_subscription"
-            )
-        ])
-        
-        await callback.message.answer(
-            "✅ SubGram подписки подтверждены!\n\n"
-            "ℹ️ Теперь подпишитесь на наших спонсоров\n"
-            "❕ Подпишитесь и нажмите \"🔄 Проверить подписку\".",
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
-        return
-    
-    # ВСЕГДА делаем актуальную проверку подписки
-    results = await check_all_subscriptions_and_update(callback.bot, user_id)
-    unsubscribed_channels = get_unsubscribed_channels_for_user(user_id)
-    
-    if unsubscribed_channels:
-        # Обновляем клавиатуру с оставшимися каналами
-        keyboard = create_subscription_keyboard(unsubscribed_channels)
-        
-        warning_message = (
-            "✅ SubGram подписки подтверждены!\n\n"
-            "ℹ️ Теперь подпишитесь на наших спонсоров\n"
-            "❕ Подпишитесь и нажмите \"🔄 Проверить подписку\"."
-        )
-        
-        await callback.message.answer(warning_message, reply_markup=keyboard, parse_mode="HTML")
-    else:
-        # Все подписки выполнены
-        await send_welcome(callback.message)
+# ================== ПРИВЕТСТВИЕ ==================
 
 async def send_welcome(message: types.Message):
     """Отправка приветственного сообщения"""
+    user_id = message.from_user.id
+    USERS.add(user_id)
+
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🔥 Наш канал", url=CHANNEL_URL)],
-            [InlineKeyboardButton(text="📤 Загрузить скрипт", callback_data="upload_script")]
+            [InlineKeyboardButton(text="📤 Загрузить скрипт", callback_data="upload_script")],
+            [InlineKeyboardButton(text="🔗 Загрузить ссылку", callback_data="upload_link")]
         ]
     )
 
@@ -926,8 +431,10 @@ async def send_welcome(message: types.Message):
         "• 🔁 <b>Постоянные обновления — всё актуально и стабильно работает</b>\n\n"
         "📤 <b>Загрузить свой скрипт:</b>\n"
         "Нажми кнопку ниже чтобы загрузить свой скрипт и получить уникальную ссылку!\n\n"
+        "🔗 <b>ИЛИ Загрузить ссылку:</b>\n"
+        "Нажми 'Загрузить ссылку' чтобы создать уникальную ссылку на любой контент!\n\n"
         "❗️ <b>Важно:</b>\n"
-        "Чтобы получить скрипт — просто перейди в нужный канал и нажми кнопку «Получить скрипт 🚀»\n\n"
+        "Чтобы получить скрипт — просто перейди в нужный канал и нажми кнопку «Получить скрипт»\n\n"
         "<b>Для сотрудничества:</b> @SecretLinkAds"
     )
 
@@ -937,37 +444,142 @@ async def send_welcome(message: types.Message):
         parse_mode="HTML"
     )
 
-async def show_script_content(message: types.Message, script_content: str):
+# ================== /start с уникальными ссылками ==================
+
+@router.message(CommandStart())
+async def start_handler(message: types.Message):
+    """Обработка команды /start"""
+    if message.chat.type != "private":
+        return
+    
+    USERS.add(message.from_user.id)
+    
+    if len(message.text.split()) > 1:
+        unique_code = message.text.split()[1]
+        
+        response = await get_subgram_sponsors(message.from_user.id, message.chat.id)
+        
+        if response and response.get("status") == "warning":
+            keyboard = create_subscription_keyboard(response)
+            warning_message = "❗ Чтобы получить доступ к боту, подпишитесь на следующие каналы:"
+            
+            await message.answer(
+                warning_message,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        
+        script_data = get_script_content(unique_code)
+        
+        if script_data:
+            await show_script_content(message, script_data)
+            return
+        else:
+            await message.answer("❌ Ссылка не найдена или устарела")
+            return
+    
+    response = await get_subgram_sponsors(message.from_user.id, message.chat.id)
+
+    if response and response.get("status") == "warning":
+        keyboard = create_subscription_keyboard(response)
+        warning_message = "❗ Чтобы получить доступ к боту, подпишитесь на следующие каналы:"
+        
+        await message.answer(
+            warning_message,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+        return
+
+    await send_welcome(message)
+
+async def show_script_content(message: types.Message, script_data: dict):
     """Показать скрипт с форматированием"""
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(
-                text="⚡️ Больше скриптов ⚡️", 
-                url="https://t.me/script_f"
-            )],
-            [InlineKeyboardButton(
-                text="📤 Загрузить свой скрипт", 
-                callback_data="upload_script"
-            )]
-        ]
-    )
+    script_content = script_data['content']
+    is_special = script_data['is_special']
+    link_url = script_data['link_url']
     
-    # Форматирование скрипта
-    if script_content.startswith('$'):
-        script_content = script_content[1:]
+    if is_special:
+        # Специальный режим - только ссылка
+        # Как на второй фотографии: оставляем "Ваш скрипт" и кнопку
+        header_text = ""  # Убираем "✅ | Спасибо за подписки!"
+        script_text = "<b>Ваш скрипт ⬇️</b>"  # Оставляем как на второй фотке
+        footer_text = ""  # Убираем "@{BOT_USERNAME}"
+        
+        final_text = script_text  # Только "Ваш скрипт ⬇️"
+        
+        keyboard_buttons = []
+        
+        if link_url:
+            keyboard_buttons.append([
+                InlineKeyboardButton(
+                    text="Получить скрипт 🚀",
+                    url=link_url
+                )
+            ])
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons) if keyboard_buttons else None
+        
+        # Отправляем сообщение как на второй фотке
+        await message.answer(
+            final_text,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+        
+    else:
+        # Обычный режим - оставляем как было
+        formatted_script = format_script_for_display(script_content)
+        
+        header_text = "<b>✅ | Спасибо за подписки!</b>\n\n"
+        footer_text = f"\n\n<b>@</b>{BOT_USERNAME}"
+        
+        final_text = header_text + formatted_script + footer_text
+        
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="⚡️ Больше скриптов ⚡️", 
+                    url="https://t.me/script_f"
+                )],
+                [InlineKeyboardButton(
+                    text="📤 Загрузить свой скрипт", 
+                    callback_data="upload_script"
+                )]
+            ]
+        )
+        
+        await message.answer(
+            final_text,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+
+@router.callback_query(F.data == "check_subscription")
+async def check_subscription_callback(callback: types.CallbackQuery):
+    """Проверка подписки"""
+    await callback.answer("⏳ Проверяем подписку...")
     
-    script_content = script_content.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    try:
+        await callback.message.delete()
+    except:
+        pass
     
-    header_text = "<b>✅ | Спасибо за подписки!</b>\n\n"
-    footer_text = f"\n\n<b>@</b>{BOT_USERNAME}"
+    response = await get_subgram_sponsors(callback.from_user.id, callback.message.chat.id)
     
-    final_text = header_text + f"<code>{script_content}</code>" + footer_text
+    if response and response.get("status") == "warning":
+        keyboard = create_subscription_keyboard(response)
+        warning_message = "❌ Вы еще не подписались на все каналы!\n\n❗ Чтобы получить доступ к боту, подпишитесь на следующие каналы:"
+        
+        await callback.message.answer(
+            warning_message,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+        return
     
-    await message.answer(
-        final_text,
-        reply_markup=keyboard,
-        parse_mode="HTML"
-    )
+    await send_welcome(callback.message)
 
 # ================== КОМАНДЫ ДЛЯ СОЗДАТЕЛЕЙ СКРИПТОВ ==================
 
@@ -1003,25 +615,17 @@ async def add_creator_command(message: types.Message):
             username = None
             full_name = f"User_{user_id}"
         
-        conn = sqlite3.connect('scripts.db')
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        INSERT OR REPLACE INTO script_creators (user_id, username, full_name, is_active)
-        VALUES (?, ?, ?, 1)
-        ''', (user_id, username, full_name))
-        
-        conn.commit()
-        conn.close()
-        
-        await message.answer(
-            f"✅ <b>Создатель скриптов добавлен!</b>\n\n"
-            f"👤 <b>ID:</b> <code>{user_id}</code>\n"
-            f"📛 <b>Имя:</b> {full_name}\n"
-            f"🔗 <b>Username:</b> @{username if username else 'нет'}\n\n"
-            f"Теперь этот пользователь может загружать скрипты через админ-панель.",
-            parse_mode="HTML"
-        )
+        if add_script_creator(user_id, username, full_name):
+            await message.answer(
+                f"✅ <b>Создатель скриптов добавлен!</b>\n\n"
+                f"👤 <b>ID:</b> <code>{user_id}</code>\n"
+                f"📛 <b>Имя:</b> {full_name}\n"
+                f"🔗 <b>Username:</b> @{username if username else 'нет'}\n\n"
+                f"Теперь этот пользователь может загружать скрипты через админ-панель.",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer("❌ Ошибка при добавлении создателя")
             
     except ValueError:
         await message.answer("❌ Неверный формат ID. ID должен быть числом")
@@ -1052,20 +656,15 @@ async def remove_creator_command(message: types.Message):
             await message.answer(f"❌ Пользователь с ID {user_id} не является создателем скриптов")
             return
         
-        conn = sqlite3.connect('scripts.db')
-        cursor = conn.cursor()
-        
-        cursor.execute('DELETE FROM script_creators WHERE user_id = ?', (user_id,))
-        
-        conn.commit()
-        conn.close()
-        
-        await message.answer(
-            f"✅ <b>Создатель скриптов удален!</b>\n\n"
-            f"👤 <b>ID:</b> <code>{user_id}</code>\n\n"
-            f"Теперь этот пользователь больше не может загружать скрипты.",
-            parse_mode="HTML"
-        )
+        if remove_script_creator(user_id):
+            await message.answer(
+                f"✅ <b>Создатель скриптов удален!</b>\n\n"
+                f"👤 <b>ID:</b> <code>{user_id}</code>\n\n"
+                f"Теперь этот пользователь больше не может загружать скрипты.",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer("❌ Ошибка при удалении создателя")
             
     except ValueError:
         await message.answer("❌ Неверный формат ID. ID должен быть числом")
@@ -1079,17 +678,7 @@ async def list_creators_command(message: types.Message):
         await message.answer("⛔ У вас нет прав для выполнения этой команды")
         return
     
-    conn = sqlite3.connect('scripts.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    SELECT user_id, username, full_name, created_at, is_active 
-    FROM script_creators 
-    ORDER BY created_at DESC
-    ''')
-    
-    creators = cursor.fetchall()
-    conn.close()
+    creators = get_all_script_creators()
     
     if not creators:
         await message.answer("📭 <b>Список создателей пуст</b>", parse_mode="HTML")
@@ -1132,15 +721,16 @@ async def admin_panel(message: types.Message):
                 [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
                 [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
                 [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")],
+                [InlineKeyboardButton(text="🔗 Загрузка ссылки", callback_data="admin_upload_link")],
                 [InlineKeyboardButton(text="👥 Публичные скрипты", callback_data="admin_public_scripts")],
-                [InlineKeyboardButton(text="👑 Управление создателями", callback_data="admin_manage_creators")],
-                [InlineKeyboardButton(text="📢 Управление подписками", callback_data="admin_manage_subscriptions")]
+                [InlineKeyboardButton(text="👑 Управление создателями", callback_data="admin_manage_creators")]
             ]
         )
     else:
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")]
+                [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")],
+                [InlineKeyboardButton(text="🔗 Загрузка ссылки", callback_data="admin_upload_link")]
             ]
         )
 
@@ -1149,6 +739,7 @@ async def admin_panel(message: types.Message):
         f"📊 <b>Статистика:</b>\n"
         f"• 👥 Пользователей: {stats['total_users']}\n"
         f"• 📜 Всего скриптов: {stats['total_scripts']}\n"
+        f"• 🔗 Специальных: {stats['special_scripts']}\n"
         f"• 👤 Публичных: {stats['public_scripts']}\n"
         f"• 👑 Админских: {stats['admin_scripts']}\n"
     )
@@ -1156,8 +747,9 @@ async def admin_panel(message: types.Message):
     if message.from_user.id == ADMIN_ID:
         admin_text += f"• 👥 Создателей: {stats['active_creators']}\n"
     
-    admin_text += f"\n🔗 <b>Подписки:</b>\n"
-    admin_text += f"Каналов для подписки: {len(get_all_active_channels())}"
+    admin_text += f"\n🔗 <b>Группа для скриптов:</b>\n"
+    admin_text += f"ID: {GROUP_ID}\n"
+    admin_text += f"Топик: {TOPIC_ID}"
 
     await message.answer(admin_text, reply_markup=keyboard, parse_mode="HTML")
 
@@ -1176,6 +768,7 @@ async def admin_stats_callback(callback: types.CallbackQuery):
         "📊 <b>Статистика бота</b>\n\n"
         f"👥 Всего пользователей: <b>{stats['total_users']}</b>\n"
         f"📜 Всего скриптов: <b>{stats['total_scripts']}</b>\n"
+        f"🔗 Специальных ссылок: <b>{stats['special_scripts']}</b>\n"
         f"👤 Публичных скриптов: <b>{stats['public_scripts']}</b>\n"
         f"👑 Загружено админом: <b>{stats['admin_scripts']}</b>\n"
         f"👥 Загружено пользователями: <b>{stats['user_scripts']}</b>\n"
@@ -1186,10 +779,13 @@ async def admin_stats_callback(callback: types.CallbackQuery):
     else:
         stats_text += "\n"
     
-    channels = get_all_active_channels()
-    stats_text += f"📢 Каналов для подписки: <b>{len(channels)}</b>\n"
-    stats_text += f"📤 Загрузка скриптов: <b>✅ Доступна всем</b>\n"
-    stats_text += f"🔗 Используется SubGram: <b>✅ Да</b>"
+    stats_text += (
+        f"📤 Загрузка скриптов: <b>✅ Доступна всем</b>\n"
+        f"🔗 Загрузка ссылок: <b>✅ Доступна всем</b>\n"
+        f"🔗 Используется SubGram: <b>✅ Да</b>\n"
+        f"👥 Группа: <b>{GROUP_ID}</b>\n"
+        f"📌 Топик: <b>{TOPIC_ID}</b>"
+    )
     
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -1214,6 +810,23 @@ async def upload_script_callback(callback: types.CallbackQuery):
     )
     await callback.answer()
 
+@router.callback_query(F.data == "upload_link")
+async def upload_link_callback(callback: types.CallbackQuery):
+    """Загрузка ссылки - доступна всем пользователям"""
+    SPECIAL_UPLOADING_USERS.add(callback.from_user.id)
+    
+    await callback.message.answer(
+        "🔗 <b>Загрузка ссылки</b>\n\n"
+        "Отправьте любую ссылку (например: https://t.me/script_f).\n\n"
+        "После отправки бот создаст уникальную ссылку.\n"
+        "Когда пользователь перейдет по этой ссылке, он увидит:\n"
+        "• <b>Ваш скрипт ⬇️</b> (жирным шрифтом)\n"
+        "• Кнопку 'Получить скрипт' с вашей ссылкой\n\n"
+        "<i>Просто отправьте ссылку следующим сообщением</i>",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
 @router.callback_query(F.data == "admin_upload_script")
 async def admin_upload_script_callback(callback: types.CallbackQuery):
     """Загрузка скрипта из админ-панели"""
@@ -1232,6 +845,27 @@ async def admin_upload_script_callback(callback: types.CallbackQuery):
     )
     await callback.answer()
 
+@router.callback_query(F.data == "admin_upload_link")
+async def admin_upload_link_callback(callback: types.CallbackQuery):
+    """Загрузка ссылки из админ-панели"""
+    if not (callback.from_user.id == ADMIN_ID or is_script_creator(callback.from_user.id)):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    
+    SPECIAL_UPLOADING_USERS.add(callback.from_user.id)
+    
+    await callback.message.edit_text(
+        "🔗 <b>Загрузка ссылки</b>\n\n"
+        "Отправьте любую ссылку (например: https://t.me/script_f).\n\n"
+        "После отправки бот создаст уникальную ссылку.\n"
+        "Когда пользователь перейдет по этой ссылке, он увидит:\n"
+        "• <b>Ваш скрипт ⬇️</b> (жирным шрифтом)\n"
+        "• Кнопку 'Получить скрипт' с вашей ссылкой\n\n"
+        "<i>Просто отправьте ссылку следующим сообщением</i>",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
 @router.callback_query(F.data == "admin_public_scripts")
 async def admin_public_scripts(callback: types.CallbackQuery):
     """Публичные скрипты"""
@@ -1245,8 +879,11 @@ async def admin_public_scripts(callback: types.CallbackQuery):
     cursor.execute('SELECT COUNT(*) FROM scripts WHERE is_public = 1')
     total_public = cursor.fetchone()[0]
     
+    cursor.execute('SELECT COUNT(*) FROM scripts WHERE is_special = 1')
+    total_special = cursor.fetchone()[0]
+    
     cursor.execute('''
-    SELECT unique_code, script_content, created_by, created_at 
+    SELECT unique_code, script_content, created_by, created_at, is_special, link_url 
     FROM scripts WHERE is_public = 1 
     ORDER BY created_at DESC LIMIT 10
     ''')
@@ -1254,18 +891,23 @@ async def admin_public_scripts(callback: types.CallbackQuery):
     recent_scripts = cursor.fetchall()
     conn.close()
     
-    stats_text = f"📜 <b>Публичные скрипты: {total_public}</b>\n\n"
+    stats_text = f"📜 <b>Публичные скрипты: {total_public}</b>\n"
+    stats_text += f"🔗 <b>Специальные ссылки: {total_special}</b>\n\n"
     
     if recent_scripts:
         stats_text += "<b>Последние 10 скриптов:</b>\n"
-        for i, (code, content, user_id, created_at) in enumerate(recent_scripts, 1):
+        for i, (code, content, user_id, created_at, is_special, link_url) in enumerate(recent_scripts, 1):
             preview = content[:30] + "..." if len(content) > 30 else content
             stats_text += f"{i}. <code>{code}</code>\n"
             stats_text += f"   👤 ID: {user_id}\n"
             stats_text += f"   📝 {preview}\n"
+            if is_special and link_url:
+                stats_text += f"   🔗 Ссылка: {link_url[:30]}...\n"
             stats_text += f"   🕐 {created_at}\n\n"
     else:
         stats_text += "📭 Нет публичных скриптов\n"
+    
+    stats_text += f"\n🔗 <b>Ссылка на группу:</b>\nhttps://t.me/c/{abs(GROUP_ID) - 1000000000000}/{TOPIC_ID}"
     
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -1283,17 +925,7 @@ async def admin_manage_creators(callback: types.CallbackQuery):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
     
-    conn = sqlite3.connect('scripts.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    SELECT user_id, username, full_name, created_at, is_active 
-    FROM script_creators 
-    ORDER BY created_at DESC
-    ''')
-    
-    creators = cursor.fetchall()
-    conn.close()
+    creators = get_all_script_creators()
     
     text = "<b>👑 Управление создателями скриптов</b>\n\n"
     
@@ -1323,47 +955,11 @@ async def admin_manage_creators(callback: types.CallbackQuery):
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
-@router.callback_query(F.data == "admin_manage_subscriptions")
-async def admin_manage_subscriptions(callback: types.CallbackQuery):
-    """Управление обязательными подписками"""
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
-    
-    channels = get_all_active_channels()
-    
-    text = "<b>📢 Управление обязательными подписками</b>\n\n"
-    
-    if channels:
-        text += "<b>Текущие каналы для подписки:</b>\n"
-        for i, channel in enumerate(channels, 1):
-            text += f"{i}. <b>{channel.get('channel_title', 'Без названия')}</b>\n"
-            text += f"   🔗 {channel['channel_url']}\n"
-            if channel.get('channel_username'):
-                text += f"   👤 @{channel['channel_username']}\n"
-            text += f"   🆔 {channel['channel_id']}\n\n"
-    else:
-        text += "📭 Нет каналов для подписки\n\n"
-    
-    text += "<b>Команды:</b>\n"
-    text += "<code>/op [ссылка]</code> - добавить канал\n"
-    text += "<code>/stop [ссылка]</code> - удалить канал\n"
-    text += "<code>/eop</code> - список всех каналов"
-    
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="back_to_admin")]
-        ]
-    )
-    
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    await callback.answer()
-
-# ================== РАССЫЛКА ==================
+# ================== РАССЫЛКА С КНОПКАМИ ==================
 
 @router.callback_query(F.data == "admin_broadcast")
 async def admin_broadcast_callback(callback: types.CallbackQuery, state: FSMContext):
-    """Начало процесса рассылки"""
+    """Рассылка (только для главного админа)"""
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Нет доступа к рассылке", show_alert=True)
         return
@@ -1375,8 +971,8 @@ async def admin_broadcast_callback(callback: types.CallbackQuery, state: FSMCont
         "• Фото с подписью\n"
         "• Видео с подписью\n"
         "• Документ с подписью\n\n"
-        "<i>Просто отправьте сообщение следующим сообщением</i>\n\n"
-        "Чтобы отменить рассылку, отправьте /cancel",
+        "Просто отправьте сообщение следующим сообщением.\n\n"
+        "После этого вы сможете добавить кнопки.",
         parse_mode="HTML"
     )
     
@@ -1390,52 +986,47 @@ async def handle_broadcast_message(message: types.Message, state: FSMContext):
         return
     
     # Сохраняем данные сообщения
-    message_data = {
-        'content_type': message.content_type,
-        'text': message.text or message.caption or "",
-    }
+    await state.update_data(
+        content_type=message.content_type,
+        text=message.text or message.caption or "",
+        photo=message.photo[-1].file_id if message.photo else None,
+        video=message.video.file_id if message.video else None,
+        document=message.document.file_id if message.document else None
+    )
     
-    if message.photo:
-        message_data['photo'] = message.photo[-1].file_id
-    elif message.video:
-        message_data['video'] = message.video.file_id
-    elif message.document:
-        message_data['document'] = message.document.file_id
-    
-    await state.update_data(message_data=message_data)
-    
-    # Запрашиваем кнопки
     await message.answer(
         "✅ <b>Сообщение для рассылки принято!</b>\n\n"
-        "⛓ <b>КНОПКИ: URL-кнопки</b>\n\n"
-        "Отправьте боту список URL-кнопок в следующем формате:\n\n"
-        "<code>Кнопка 1 — http://link.com</code>\n"
-        "<code>Кнопка 2 — http://link.com</code>\n\n"
-        "<b>Используйте разделитель «|», чтобы добавить до 8 кнопок в один ряд (допустимо 15 рядов):</b>\n\n"
-        "<code>Кнопка 1 — http://link.com | Кнопка 2 — http://link.com</code>\n\n"
-        "<b>Пример с несколькими рядами:</b>\n"
-        "<code>Наш канал — https://t.me/script_f</code>\n"
-        "<code>Поддержка — https://t.me/support | Донат — https://donate.com</code>\n\n"
-        "Если кнопки не нужны, отправьте: <code>/no_buttons</code>\n"
-        "Чтобы отменить рассылку, отправьте: <code>/cancel</code>",
+        "📝 <b>Что дальше:</b>\n"
+        "1. Если нужны кнопки - отправьте их в формате:\n\n"
+        "<code>Текст кнопки 1 - https://ссылка1.com</code>\n"
+        "<code>Текст кнопки 2 - https://ссылка2.com | Текст кнопки 3 - https://ссылка3.com</code>\n\n"
+        "<b>Формат:</b>\n"
+        "• Каждая строка - новый ряд кнопок\n"
+        "• Разделитель между кнопками в одном ряду - |\n"
+        "• Разделитель между текстом и ссылкой - -\n\n"
+        "<b>Пример:</b>\n"
+        "<code>Наш канал - https://t.me/script_f</code>\n"
+        "<code>Поддержка - https://t.me/secretlink | Донат - https://donate.com</code>\n\n"
+        "2. Чтобы начать рассылку без кнопок, отправьте: <code>/start_broadcast</code>\n"
+        "3. Чтобы отменить рассылку, отправьте: <code>/cancel</code>",
         parse_mode="HTML"
     )
     
     await state.set_state(BroadcastStates.waiting_for_buttons)
 
-@router.message(BroadcastStates.waiting_for_buttons, Command("no_buttons"))
-async def broadcast_no_buttons(message: types.Message, state: FSMContext):
-    """Рассылка без кнопок"""
+@router.message(BroadcastStates.waiting_for_buttons, Command("start_broadcast"))
+async def start_broadcast_without_buttons(message: types.Message, state: FSMContext):
+    """Начало рассылки без кнопок"""
     if message.from_user.id != ADMIN_ID:
         return
     
     user_data = await state.get_data()
-    message_data = user_data.get('message_data', {})
     
+    # Очищаем состояние
     await state.clear()
     
-    # Начинаем рассылку без кнопок
-    await start_broadcast(message.bot, message.chat.id, message_data, None)
+    # Начинаем рассылку
+    await send_broadcast(message, user_data, None)
 
 @router.message(BroadcastStates.waiting_for_buttons, Command("cancel"))
 async def cancel_broadcast(message: types.Message, state: FSMContext):
@@ -1452,89 +1043,83 @@ async def handle_broadcast_buttons(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
     
-    if not message.text:
-        await message.answer("❌ Отправьте текст с кнопками в указанном формате")
-        return
-    
     user_data = await state.get_data()
-    message_data = user_data.get('message_data', {})
     
-    # Парсим кнопки
-    keyboard_buttons = parse_broadcast_buttons(message.text)
-    
-    if keyboard_buttons:
-        keyboard_markup = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    if message.text:
+        # Парсим кнопки
+        buttons = parse_buttons(message.text)
+        
+        if buttons:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        else:
+            keyboard = None
+        
+        # Очищаем состояние
+        await state.clear()
+        
+        # Начинаем рассылку
+        await send_broadcast(message, user_data, keyboard)
     else:
-        keyboard_markup = None
-        await message.answer("⚠️ Кнопки не распознаны. Начинаю рассылку без кнопок.")
-    
-    await state.clear()
-    
-    # Начинаем рассылку
-    await start_broadcast(message.bot, message.chat.id, message_data, keyboard_markup)
+        await message.answer("❌ Отправьте текст с кнопками или команду /start_broadcast / /cancel")
 
-async def start_broadcast(bot: Bot, chat_id: int, message_data: dict, keyboard_markup: Optional[InlineKeyboardMarkup] = None):
-    """Запуск рассылки"""
-    total_users = len(USERS)
-    if total_users == 0:
-        await bot.send_message(chat_id, "❌ Нет пользователей для рассылки")
-        return
+async def send_broadcast(message: types.Message, broadcast_data: dict, keyboard: InlineKeyboardMarkup = None):
+    """Выполнение рассылки"""
+    sent = 0
+    failed = 0
     
-    progress_msg = await bot.send_message(
-        chat_id,
-        f"📢 <b>Начинаю рассылку для {total_users} пользователей...</b>\n"
-        f"⏳ Отправлено: 0/{total_users}\n"
-        f"📊 Успешно: 0\n"
-        f"❌ Ошибок: 0",
-        parse_mode="HTML"
-    )
-    
-    sent_success = 0
-    sent_failed = 0
-    sent_total = 0
+    await message.answer(f"⏳ Начинаю рассылку для {len(USERS)} пользователей...")
     
     for user_id in list(USERS):
         try:
-            success = await send_broadcast_to_user(bot, user_id, message_data, keyboard_markup)
-            
-            if success:
-                sent_success += 1
-            else:
-                sent_failed += 1
-            
-            sent_total += 1
-            
-            # Обновляем прогресс каждые 10 сообщений
-            if sent_total % 10 == 0 or sent_total == total_users:
-                await progress_msg.edit_text(
-                    f"📢 <b>Рассылка в процессе...</b>\n"
-                    f"⏳ Отправлено: {sent_total}/{total_users}\n"
-                    f"📊 Успешно: {sent_success}\n"
-                    f"❌ Ошибок: {sent_failed}",
+            if broadcast_data['content_type'] == 'text':
+                await message.bot.send_message(
+                    chat_id=user_id,
+                    text=broadcast_data['text'],
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            elif broadcast_data['content_type'] == 'photo':
+                await message.bot.send_photo(
+                    chat_id=user_id,
+                    photo=broadcast_data['photo'],
+                    caption=broadcast_data['text'],
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            elif broadcast_data['content_type'] == 'video':
+                await message.bot.send_video(
+                    chat_id=user_id,
+                    video=broadcast_data['video'],
+                    caption=broadcast_data['text'],
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            elif broadcast_data['content_type'] == 'document':
+                await message.bot.send_document(
+                    chat_id=user_id,
+                    document=broadcast_data['document'],
+                    caption=broadcast_data['text'],
+                    reply_markup=keyboard,
                     parse_mode="HTML"
                 )
             
-            # Небольшая задержка, чтобы не перегружать сервер
+            sent += 1
             await asyncio.sleep(0.1)
             
         except Exception as e:
-            logging.error(f"Критическая ошибка при рассылке пользователю {user_id}: {e}")
-            sent_failed += 1
-            sent_total += 1
+            failed += 1
+            logging.error(f"Не удалось отправить пользователю {user_id}: {e}")
     
-    # Отправляем финальный отчет
-    success_rate = (sent_success / total_users * 100) if total_users > 0 else 0
-    
-    await progress_msg.edit_text(
+    result_text = (
         f"✅ <b>Рассылка завершена!</b>\n\n"
         f"📊 <b>Статистика:</b>\n"
-        f"👥 Всего пользователей: {total_users}\n"
-        f"📨 Отправлено: {sent_total}\n"
-        f"✅ Успешно: {sent_success}\n"
-        f"❌ Ошибок: {sent_failed}\n"
-        f"📈 Эффективность: {success_rate:.1f}%",
-        parse_mode="HTML"
+        f"• Отправлено: {sent}\n"
+        f"• Не удалось: {failed}\n"
+        f"• Всего пользователей: {len(USERS)}\n\n"
+        f"📈 <b>Эффективность:</b> {(sent/(sent+failed)*100 if (sent+failed) > 0 else 0):.1f}%"
     )
+    
+    await message.answer(result_text, parse_mode="HTML")
 
 @router.callback_query(F.data == "back_to_admin")
 async def back_to_admin_callback(callback: types.CallbackQuery):
@@ -1551,15 +1136,16 @@ async def back_to_admin_callback(callback: types.CallbackQuery):
                 [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
                 [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
                 [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")],
+                [InlineKeyboardButton(text="🔗 Загрузка ссылки", callback_data="admin_upload_link")],
                 [InlineKeyboardButton(text="👥 Публичные скрипты", callback_data="admin_public_scripts")],
-                [InlineKeyboardButton(text="👑 Управление создателями", callback_data="admin_manage_creators")],
-                [InlineKeyboardButton(text="📢 Управление подписками", callback_data="admin_manage_subscriptions")]
+                [InlineKeyboardButton(text="👑 Управление создателями", callback_data="admin_manage_creators")]
             ]
         )
     else:
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")]
+                [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")],
+                [InlineKeyboardButton(text="🔗 Загрузка ссылки", callback_data="admin_upload_link")]
             ]
         )
     
@@ -1568,6 +1154,7 @@ async def back_to_admin_callback(callback: types.CallbackQuery):
         f"📊 <b>Статистика:</b>\n"
         f"• 👥 Пользователей: {stats['total_users']}\n"
         f"• 📜 Всего скриптов: {stats['total_scripts']}\n"
+        f"• 🔗 Специальных: {stats['special_scripts']}\n"
         f"• 👤 Публичных: {stats['public_scripts']}\n"
         f"• 👑 Админских: {stats['admin_scripts']}\n"
     )
@@ -1575,13 +1162,13 @@ async def back_to_admin_callback(callback: types.CallbackQuery):
     if callback.from_user.id == ADMIN_ID:
         admin_text += f"• 👥 Создателей: {stats['active_creators']}\n"
     
-    admin_text += f"\n🔗 <b>Подписки:</b>\n"
-    admin_text += f"Каналов для подписки: {len(get_all_active_channels())}"
+    admin_text += f"\n🔗 <b>Группа для скриптов:</b>\n"
+    admin_text += f"ID: {GROUP_ID}\n"
+    admin_text += f"Топик: {TOPIC_ID}"
     
     await callback.message.edit_text(admin_text, reply_markup=keyboard, parse_mode="HTML")
-    await callback.answer()
 
-# ================== ЗАГРУЗКА СКРИПТОВ ==================
+# ================== ОБРАБОТКА ЗАГРУЗКИ СКРИПТА ==================
 
 @router.message(F.content_type.in_({'text', 'document'}))
 async def handle_script_upload(message: types.Message):
@@ -1589,48 +1176,147 @@ async def handle_script_upload(message: types.Message):
     if message.chat.type != "private":
         return
     
-    if message.from_user.id not in UPLOADING_USERS:
-        return
-    
-    UPLOADING_USERS.discard(message.from_user.id)
-    
-    script_content = ""
-    
-    if message.content_type == 'text':
-        script_content = message.text.strip()
-    elif message.content_type == 'document' and message.document:
-        try:
-            file = await message.bot.download(message.document)
-            content = file.read()
-            if isinstance(content, bytes):
-                script_content = content.decode('utf-8', errors='ignore')
-            else:
-                script_content = str(content)
-        except Exception as e:
-            await message.answer(f"❌ Не удалось прочитать файл: {str(e)}")
+    # Проверяем загрузку скрипта
+    if message.from_user.id in UPLOADING_USERS:
+        UPLOADING_USERS.discard(message.from_user.id)
+        
+        # Получаем текст скрипта
+        script_content = ""
+        
+        if message.content_type == 'text':
+            script_content = message.text.strip()
+        elif message.content_type == 'document' and message.document:
+            try:
+                file = await message.bot.download(message.document)
+                content = file.read()
+                if isinstance(content, bytes):
+                    script_content = content.decode('utf-8', errors='ignore')
+                else:
+                    script_content = str(content)
+            except Exception as e:
+                await message.answer(f"❌ Не удалось прочитать файл: {str(e)}. Отправьте скрипт как текст.")
+                return
+        else:
+            await message.answer("❌ Отправьте скрипт в виде текста или текстового файла.")
+            return
+        
+        if not script_content or len(script_content.strip()) < 10:
+            await message.answer("❌ Скрипт не может быть пустым или слишком коротким (минимум 10 символов).")
+            return
+        
+        # Сохраняем скрипт в базу данных (публичным для всех, обычный скрипт)
+        unique_code = save_script_to_db(script_content, message.from_user.id, is_public=True, is_special=False)
+        
+        # Создаем ссылку
+        link = f"https://t.me/{BOT_USERNAME}?start={unique_code}"
+        
+        # Показываем результат
+        preview_text = "<b>✅ Скрипт успешно загружен!</b>\n\n"
+        preview_text += f"<b>🎯 Ваша уникальная ссылка:</b>\n<code>{link}</code>\n\n"
+        
+        preview_text += f"<b>📊 Информация о ссылке:</b>\n"
+        preview_text += f"• 👥 <b>Тип:</b> Обычный скрипт\n"
+        preview_text += f"• 📝 <b>Размер скрипта:</b> {len(script_content)} символов\n"
+        preview_text += f"• 🕐 <b>Создана:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+        
+        script_preview = script_content[:200] + "..." if len(script_content) > 200 else script_content
+        formatted_preview = format_script_for_display(script_preview)
+        
+        preview_text += "<b>📝 Предпросмотр скрипта:</b>\n"
+        preview_text += formatted_preview + "\n\n"
+        
+        preview_text += "<b>💡 Как пользоваться:</b>\n"
+        preview_text += "1. Скопируйте ссылку выше\n"
+        preview_text += "2. Отправьте друзьям или в чаты\n"
+        preview_text += "3. При переходе по ссылке откроется скрипт\n\n"
+        
+        preview_text += "🔗 <b>Наш канал:</b> @script_f"
+        
+        # Клавиатура с кнопками
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Загрузить еще один", callback_data="upload_script")],
+                [InlineKeyboardButton(text="🔗 Загрузить ссылку", callback_data="upload_link")],
+                [InlineKeyboardButton(text="📢 Поделиться ссылкой", url=f"https://t.me/share/url?url={link}&text=🎮+Топ-скрипт+для+Roblox+🔥%0A"
+            "Хочешь+больше+возможностей+в+игре%3F%0A"
+            "Лучшие+скрипты+уже+ждут+тебя!%0A"
+            "👉+Подписывайся:+@script_f")],
+                [InlineKeyboardButton(text="🔥 Наш канал", url=CHANNEL_URL)]
+            ]
+        )
+        
+        await message.answer(preview_text, reply_markup=keyboard, parse_mode="HTML")
+        
+    # Проверяем загрузку ссылки
+    elif message.from_user.id in SPECIAL_UPLOADING_USERS:
+        SPECIAL_UPLOADING_USERS.discard(message.from_user.id)
+        
+        if message.content_type == 'text':
+            link_url = message.text.strip()
+            
+            # Проверяем, что это валидная ссылка
+            if not (link_url.startswith('http://') or link_url.startswith('https://')):
+                await message.answer("❌ Это не валидная ссылка. Отправьте ссылку начинающуюся с http:// или https://")
+                return
+            
+            # Создаем специальный скрипт с заголовком (текст будет заменен в save_script_to_db)
+            script_content = ""  # Пустой текст, так как будет заменен на "<b>Ваш скрипт ⬇️</b>"
+            
+            # Сохраняем в базу данных как специальный скрипт
+            unique_code = save_script_to_db(
+                script_content, 
+                message.from_user.id, 
+                is_public=True, 
+                is_special=True, 
+                link_url=link_url
+            )
+            
+            # Создаем ссылку на бота
+            bot_link = f"https://t.me/{BOT_USERNAME}?start={unique_code}"
+            
+            # Показываем результат
+            preview_text = "<b>✅ Ссылка успешно загружена!</b>\n\n"
+            preview_text += f"<b>🎯 Ваша уникальная ссылка:</b>\n<code>{bot_link}</code>\n\n"
+            
+            preview_text += f"<b>📊 Информация о ссылке:</b>\n"
+            preview_text += f"• 🔗 <b>Тип:</b> Специальная ссылка\n"
+            preview_text += f"• 📎 <b>Ваша ссылка:</b> {link_url}\n"
+            preview_text += f"• 🕐 <b>Создана:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+            
+            preview_text += "<b>👀 Как это будет выглядеть:</b>\n"
+            preview_text += "1. Пользователь переходит по вашей ссылке\n"
+            preview_text += "2. Видит: <b>Ваш скрипт ⬇️</b>\n"
+            preview_text += "3. Видит кнопку: <b>Получить скрипт</b>\n"
+            preview_text += "4. Нажимает и переходит по вашей ссылке\n\n"
+            
+            preview_text += "<b>💡 Как пользоваться:</b>\n"
+            preview_text += "1. Скопируйте ссылку выше\n"
+            preview_text += "2. Отправьте друзьям или в чаты\n"
+            preview_text += "3. При переходе откроется страница с вашей ссылкой\n\n"
+            
+            preview_text += "🔗 <b>Наш канал:</b> @script_f"
+            
+            # Клавиатура с кнопками
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Загрузить еще одну", callback_data="upload_link")],
+                    [InlineKeyboardButton(text="📤 Загрузить скрипт", callback_data="upload_script")],
+                    [InlineKeyboardButton(text="📢 Поделиться ссылкой", url=f"https://t.me/share/url?url={bot_link}&text=🎮+Топ-скрипт+для+Roblox+🔥%0A"
+                "Хочешь+больше+возможностей+в+игре%3F%0A"
+                "Получи+лучший+скрипт+прямо+сейчас!%0A"
+                "👉+Нажми+на+ссылку+и+получи+скрипт")],
+                    [InlineKeyboardButton(text="🔥 Наш канал", url=CHANNEL_URL)]
+                ]
+            )
+            
+            await message.answer(preview_text, reply_markup=keyboard, parse_mode="HTML")
+        else:
+            await message.answer("❌ Отправьте ссылку в виде текста.")
             return
     
-    if not script_content or len(script_content.strip()) < 10:
-        await message.answer("❌ Скрипт не может быть пустым или слишком коротким")
+    else:
+        # Если пользователь не в процессе загрузки, просто игнорируем сообщение
         return
-    
-    unique_code = save_script_to_db(script_content, message.from_user.id, is_public=True)
-    link = f"https://t.me/{BOT_USERNAME}?start={unique_code}"
-    
-    preview_text = "<b>✅ Скрипт успешно загружен!</b>\n\n"
-    preview_text += f"<b>🎯 Ваша уникальная ссылка:</b>\n<code>{link}</code>\n\n"
-    
-    script_preview = script_content[:200] + "..." if len(script_content) > 200 else script_content
-    preview_text += f"<b>📝 Предпросмотр скрипта:</b>\n<code>{script_preview}</code>\n\n"
-    
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Загрузить еще", callback_data="upload_script")],
-            [InlineKeyboardButton(text="📢 Поделиться", url=f"https://t.me/share/url?url={link}")]
-        ]
-    )
-    
-    await message.answer(preview_text, reply_markup=keyboard, parse_mode="HTML")
 
 # ================== ОБРАБОТКА ДРУГИХ СООБЩЕНИЙ ==================
 
@@ -1658,7 +1344,8 @@ async def main():
     try:
         me = await bot.get_me()
         logging.info(f"Бот запущен: @{me.username}")
-        logging.info(f"ID администратора: {ADMIN_ID}")
+        logging.info(f"ID группы для мониторинга: {GROUP_ID}")
+        logging.info(f"ID топика: {TOPIC_ID}")
     except Exception as e:
         logging.error(f"Ошибка при получении информации о боте: {e}")
     
