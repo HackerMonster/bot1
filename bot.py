@@ -7,6 +7,8 @@ import re
 import random
 import string
 from datetime import datetime
+import httpx
+import json
 
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.filters import CommandStart, Command
@@ -21,6 +23,14 @@ BOT_TOKEN = "8549573387:AAG6oAmjI-w8niZScnzNz42OX_5tiHnLw_k"
 SUBGRAM_API_KEY = "f5d4e6567b52e995ebf408cb75ac22740e25c9a02a0427941386c97e8843e891"
 SUBGRAM_URL = "https://api.subgram.org/get-sponsors"
 
+# Tgrass API настройки
+TGRASS_API_URL = "https://tgrass.space/offers"
+TGRASS_API_KEY = "dd20d4a36f0e43b381194d7b5698dad6"
+
+# Flyer API настройки
+FLYER_API_BASE = "api.flyerservice.io"  # Замените на реальный базовый URL
+FLYER_API_KEY = "FL-ElINbD-pwBXBA-BZpBwY-DFIgFF"  # Замените на ваш ключ Flyer
+
 CHANNEL_URL = "https://t.me/script_f"
 ADMIN_ID = 5870949629
 BOT_USERNAME = "LinksSecret_Bot"
@@ -28,6 +38,12 @@ BOT_USERNAME = "LinksSecret_Bot"
 # Настройки для группы/топика
 GROUP_ID = -1001897612345  # Замените на ID вашей группы (должно быть отрицательным числом)
 TOPIC_ID = 2  # ID топика, где будут отправляться скрипты
+
+# Для упрощения вместо БД используется список
+ALREADY_CHECKED_MESSAGES = []
+
+# Хранилище для Flyer задач (task_id -> signature)
+FLYER_TASKS = {}
 
 # ===============================================
 
@@ -48,6 +64,541 @@ broadcast_buttons = {}
 class BroadcastStates(StatesGroup):
     waiting_for_message = State()
     waiting_for_buttons = State()
+
+# ================== FLYER ФУНКЦИИ ==================
+
+async def get_flyer_tasks(user_id: int, language_code: str = "ru", limit: int = 10) -> dict | None:
+    """Получает задания от Flyer"""
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+            response = await client.post(
+                f"{FLYER_API_BASE}/get_tasks",
+                json={
+                    "key": FLYER_API_KEY,
+                    "user_id": int(user_id),
+                    "language_code": language_code or "ru",
+                    "limit": limit
+                },
+                headers={
+                    "accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return data
+            else:
+                logging.error(f"Flyer API error: {response.status_code}, {response.text}")
+                return None
+    except asyncio.TimeoutError:
+        logging.error("Flyer API timeout")
+        return None
+    except Exception as e:
+        logging.error(f"Flyer API error: {e}")
+        return None
+
+async def check_flyer_task(signature: str) -> dict | None:
+    """Проверяет статус задания Flyer"""
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+            response = await client.post(
+                f"{FLYER_API_BASE}/check_task",
+                json={
+                    "key": FLYER_API_KEY,
+                    "signature": signature
+                },
+                headers={
+                    "accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logging.error(f"Flyer check task error: {response.status_code}, {response.text}")
+                return None
+    except asyncio.TimeoutError:
+        logging.error("Flyer check task timeout")
+        return None
+    except Exception as e:
+        logging.error(f"Flyer check task error: {e}")
+        return None
+
+async def get_flyer_completed_tasks(user_id: int) -> dict | None:
+    """Получает выполненные задания Flyer"""
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+            response = await client.post(
+                f"{FLYER_API_BASE}/get_completed_tasks",
+                json={
+                    "key": FLYER_API_KEY,
+                    "user_id": int(user_id)
+                },
+                headers={
+                    "accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logging.error(f"Flyer completed tasks error: {response.status_code}, {response.text}")
+                return None
+    except asyncio.TimeoutError:
+        logging.error("Flyer completed tasks timeout")
+        return None
+    except Exception as e:
+        logging.error(f"Flyer completed tasks error: {e}")
+        return None
+
+def create_flyer_keyboard(tasks_data):
+    """Создание клавиатуры с заданиями Flyer"""
+    tasks = tasks_data.get("result", [])
+    keyboard = []
+    
+    for task in tasks:
+        if isinstance(task, dict):
+            # Предполагаем структуру задания
+            url = task.get("url", task.get("link", "#"))
+            name = task.get("name", task.get("title", "Задание"))
+            task_id = task.get("id", task.get("signature", ""))
+            
+            # Сохраняем связь для последующей проверки
+            if task_id:
+                button_id = f"flyer_{task_id}"
+                FLYER_TASKS[button_id] = {
+                    "signature": task_id,
+                    "url": url,
+                    "name": name
+                }
+                
+                button = InlineKeyboardButton(
+                    text=name,
+                    url=url
+                )
+                keyboard.append([button])
+    
+    if keyboard:  # Если есть задания
+        keyboard.append([
+            InlineKeyboardButton(
+                text="✅ Проверить задания Flyer",
+                callback_data="check_flyer_all"
+            )
+        ])
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# ================== TGRASS ФУНКЦИИ ==================
+
+async def get_tgrass_offers(user_id: int, username: str = None, lang: str = "ru", is_premium: bool = False) -> dict | None:
+    """Получает задания от Tgrass"""
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+            response = await client.post(
+                TGRASS_API_URL,
+                json={
+                    "tg_user_id": int(user_id),
+                    "tg_login": username or "",
+                    "lang": lang or "ru",
+                    "is_premium": is_premium,
+                },
+                headers={
+                    "accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Auth": TGRASS_API_KEY,
+                },
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logging.error(f"Tgrass API error: {response.status_code}")
+                return None
+    except asyncio.TimeoutError:
+        logging.error("Tgrass API timeout")
+        return None
+    except Exception as e:
+        logging.error(f"Tgrass API error: {e}")
+        return None
+
+def create_tgrass_keyboard(offers_data):
+    """Создание клавиатуры с каналами для подписки от Tgrass"""
+    offers = offers_data.get("offers", [])
+    keyboard = []
+    
+    for offer in offers:
+        button = InlineKeyboardButton(
+            text="Подписаться" if offer.get("type") == "channel" else "Перейти",
+            url=offer.get("link", "#")
+        )
+        keyboard.append([button])
+    
+    keyboard.append([
+        InlineKeyboardButton(
+            text="✅ Проверить выполнение",
+            callback_data="check_tgrass"
+        )
+    ])
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# ================== SubGram ФУНКЦИИ ==================
+
+async def get_subgram_sponsors(user_id: int, chat_id: int) -> dict | None:
+    headers = {"Auth": SUBGRAM_API_KEY}
+    payload = {"user_id": user_id, "chat_id": chat_id}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                SUBGRAM_URL,
+                headers=headers,
+                json=payload,
+                timeout=10
+            ) as response:
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    logging.error(f"SubGram API error: {response.status}")
+                    return None
+    except asyncio.TimeoutError:
+        logging.error("SubGram API timeout")
+        return None
+    except Exception as e:
+        logging.error(f"SubGram API error: {e}")
+        return None
+
+def create_subgram_keyboard(sponsors_data):
+    """Создание клавиатуры с каналами для подписки от SubGram"""
+    sponsors = sponsors_data.get("sponsors", [])
+    keyboard = []
+    
+    for sponsor in sponsors:
+        button = InlineKeyboardButton(
+            text=sponsor.get("name", "Канал"),
+            url=sponsor.get("url", "#")
+        )
+        keyboard.append([button])
+    
+    keyboard.append([InlineKeyboardButton(
+        text="✅ Проверить подписку",
+        callback_data="check_subscription"
+    )])
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# ================== КОМБИНИРОВАННАЯ ПРОВЕРКА ПОДПИСОК ==================
+
+async def check_all_subscriptions(user_id: int, username: str = None, lang: str = "ru", is_premium: bool = False):
+    """Проверяет подписки через все три сервиса (SubGram, Tgrass и Flyer)"""
+    results = {
+        "subgram": None,
+        "tgrass": None,
+        "flyer": None,
+        "all_passed": False
+    }
+    
+    # Проверяем SubGram
+    results["subgram"] = await get_subgram_sponsors(user_id, user_id)
+    
+    # Проверяем Tgrass
+    results["tgrass"] = await get_tgrass_offers(user_id, username, lang, is_premium)
+    
+    # Проверяем Flyer
+    results["flyer"] = await get_flyer_tasks(user_id, lang, limit=10)
+    
+    # Определяем, прошли ли все проверки
+    subgram_passed = results["subgram"] is None or results["subgram"].get("status") != "warning"
+    tgrass_passed = results["tgrass"] is None or (results["tgrass"].get("status") != "not_ok" and results["tgrass"].get("status") != "warning")
+    flyer_passed = True  # По умолчанию считаем, что Flyer пройден, если нет ошибок
+    
+    # Если Flyer вернул задания, значит еще не все выполнены
+    if results["flyer"] and results["flyer"].get("result") and len(results["flyer"].get("result", [])) > 0:
+        flyer_passed = False
+    
+    results["all_passed"] = subgram_passed and tgrass_passed and flyer_passed
+    
+    return results
+
+def create_combined_keyboard(subgram_data, tgrass_data, flyer_data):
+    """Создает комбинированную клавиатуру с заданиями от всех трех сервисов"""
+    keyboard = []
+    has_tasks = False
+    
+    # Добавляем каналы из SubGram
+    if subgram_data and subgram_data.get("status") == "warning":
+        has_tasks = True
+        sponsors = subgram_data.get("sponsors", [])
+        for sponsor in sponsors:
+            button = InlineKeyboardButton(
+                text=f"📢 {sponsor.get('name', 'Канал')}",
+                url=sponsor.get("url", "#")
+            )
+            keyboard.append([button])
+    
+    # Добавляем задания из Tgrass
+    if tgrass_data and tgrass_data.get("status") == "not_ok":
+        has_tasks = True
+        offers = tgrass_data.get("offers", [])
+        for offer in offers:
+            button_text = "🔗 Подписаться" if offer.get("type") == "channel" else "🔗 Перейти"
+            button = InlineKeyboardButton(
+                text=button_text,
+                url=offer.get("link", "#")
+            )
+            keyboard.append([button])
+    
+    # Добавляем задания из Flyer
+    if flyer_data and flyer_data.get("result") and len(flyer_data.get("result", [])) > 0:
+        has_tasks = True
+        tasks = flyer_data.get("result", [])
+        for task in tasks:
+            if isinstance(task, dict):
+                name = task.get("name", task.get("title", "Задание"))
+                url = task.get("url", task.get("link", "#"))
+                
+                button = InlineKeyboardButton(
+                    text=f"🚀 {name}",
+                    url=url
+                )
+                keyboard.append([button])
+    
+    # Добавляем кнопки проверки для всех сервисов
+    if has_tasks:
+        keyboard.append([
+            InlineKeyboardButton(
+                text="✅ Проверить все задания",
+                callback_data="check_all_subscriptions"
+            )
+        ])
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# ================== ОБРАБОТКА ПРОВЕРОК ==================
+
+@router.callback_query(F.data == "check_all_subscriptions")
+async def check_all_subscriptions_callback(callback: types.CallbackQuery):
+    """Проверка всех подписок"""
+    await callback.answer("⏳ Проверяем все задания...")
+    
+    try:
+        await callback.message.delete()
+    except:
+        pass
+    
+    results = await check_all_subscriptions(
+        user_id=callback.from_user.id,
+        username=callback.from_user.username,
+        lang=callback.from_user.language_code,
+        is_premium=callback.from_user.is_premium
+    )
+    
+    # Если есть ошибки во всех сервисах, показываем их
+    if not results["all_passed"]:
+        error_messages = []
+        has_tasks = False
+        
+        if results["subgram"] and results["subgram"].get("status") == "warning":
+            error_messages.append("SubGram: ❌ Вы не подписались на все каналы")
+            has_tasks = True
+        
+        if results["tgrass"] and results["tgrass"].get("status") == "not_ok":
+            error_messages.append("Tgrass: ❌ Вы не выполнили все задания")
+            has_tasks = True
+        
+        if results["flyer"] and results["flyer"].get("result") and len(results["flyer"].get("result", [])) > 0:
+            error_messages.append("Flyer: ❌ Вы не выполнили все задания")
+            has_tasks = True
+        
+        if has_tasks:
+            error_text = "❌ Проверка не пройдена:\n\n"
+            error_text += "\n".join(error_messages)
+            
+            keyboard = create_combined_keyboard(
+                results["subgram"], 
+                results["tgrass"], 
+                results["flyer"]
+            )
+            
+            await callback.message.answer(
+                error_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+    
+    # Если все проверки пройдены
+    await send_welcome(callback.message)
+
+# ================== FLYER ОБРАБОТЧИКИ ==================
+
+@router.callback_query(F.data == "check_flyer_all")
+async def check_flyer_all_callback(callback: types.CallbackQuery):
+    """Проверка всех заданий Flyer"""
+    await callback.answer("⏳ Проверяем задания Flyer...")
+    
+    # Проверяем выполненные задания
+    completed_tasks = await get_flyer_completed_tasks(callback.from_user.id)
+    
+    if completed_tasks:
+        count_all = completed_tasks.get("result", {}).get("count_all_tasks", 0)
+        completed = completed_tasks.get("result", {}).get("completed_tasks", [])
+        completed_count = len(completed) if isinstance(completed, list) else 0
+        
+        if completed_count >= count_all:
+            await callback.message.answer("✅ Все задания Flyer выполнены!")
+            
+            # Проверяем другие сервисы
+            results = await check_all_subscriptions(
+                user_id=callback.from_user.id,
+                username=callback.from_user.username,
+                lang=callback.from_user.language_code,
+                is_premium=callback.from_user.is_premium
+            )
+            
+            if results["all_passed"]:
+                await send_welcome(callback.message)
+            else:
+                keyboard = create_combined_keyboard(
+                    results["subgram"], 
+                    results["tgrass"], 
+                    results["flyer"]
+                )
+                await callback.message.answer(
+                    "✅ Flyer пройден!\n\nНо есть другие задания:",
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+        else:
+            # Получаем текущие задания
+            flyer_tasks = await get_flyer_tasks(callback.from_user.id, callback.from_user.language_code)
+            
+            if flyer_tasks and flyer_tasks.get("result"):
+                keyboard = create_flyer_keyboard(flyer_tasks)
+                await callback.message.answer(
+                    f"❌ Выполнено {completed_count}/{count_all} заданий Flyer\n\nПродолжайте выполнять задания:",
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+    else:
+        await callback.message.answer("❌ Не удалось проверить задания Flyer")
+
+# ================== TGRASS КОМАНДА ==================
+
+@router.message(Command("tasks"))
+async def tasks_command_handler(message: types.Message):
+    """Обработка команды /tasks - показывает задания Tgrass"""
+    tgrass_response = await get_tgrass_offers(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        lang=message.from_user.language_code,
+        is_premium=message.from_user.is_premium
+    )
+    
+    if tgrass_response and tgrass_response.get("status") == "not_ok":
+        keyboard = create_tgrass_keyboard(tgrass_response)
+        msg = await message.answer(
+            reply_markup=keyboard,
+            text="Выполнить задание",
+        )
+    else:
+        await message.answer(
+            text="На данный момент нет доступных заданий",
+        )
+
+@router.callback_query(lambda c: c.data == "check_tgrass")
+async def check_tgrass_handler(callback_query: types.CallbackQuery):
+    """Проверка выполнения задания Tgrass"""
+    await callback_query.answer()
+    
+    tgrass_response = await get_tgrass_offers(
+        user_id=callback_query.from_user.id,
+        username=callback_query.from_user.username,
+        lang=callback_query.from_user.language_code,
+        is_premium=callback_query.from_user.is_premium
+    )
+    
+    # Пользователь выполнил задание, наградить
+    if tgrass_response and tgrass_response.get("status") == "ok":
+        await callback_query.message.answer(text="✅ Задание успешно выполнено!")
+        
+        # Награждаем юзера если он не был ранее награжден
+        if callback_query.message.message_id not in ALREADY_CHECKED_MESSAGES:
+            ALREADY_CHECKED_MESSAGES.append(callback_query.message.message_id)
+            # Логика для награждения
+            await send_coins_to_user(callback_query)
+    else:
+        await callback_query.message.answer(text="❌ Задание не выполнено!")
+
+async def send_coins_to_user(callback_query: types.CallbackQuery):
+    """Функция для награждения пользователя"""
+    # Здесь можно добавить логику награждения (например, начисление валюты в вашей системе)
+    await callback_query.message.answer(
+        "🎉 Вы получили награду за выполнение задания!",
+        parse_mode="HTML"
+    )
+
+# ================== SubGram ОБРАБОТКА ==================
+
+@router.callback_query(F.data == "check_subscription")
+async def check_subscription_callback(callback: types.CallbackQuery):
+    """Проверка подписки только для SubGram"""
+    await callback.answer("⏳ Проверяем подписку...")
+    
+    try:
+        await callback.message.delete()
+    except:
+        pass
+    
+    response = await get_subgram_sponsors(callback.from_user.id, callback.message.chat.id)
+    
+    if response and response.get("status") == "warning":
+        keyboard = create_subgram_keyboard(response)
+        warning_message = "❌ Вы еще не подписались на все каналы!\n\n❗ Чтобы получить доступ к боту, подпишитесь на следующие каналы:"
+        
+        await callback.message.answer(
+            warning_message,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+        return
+    
+    # После проверки SubGram проверяем другие сервисы
+    results = await check_all_subscriptions(
+        user_id=callback.from_user.id,
+        username=callback.from_user.username,
+        lang=callback.from_user.language_code,
+        is_premium=callback.from_user.is_premium
+    )
+    
+    if not results["all_passed"]:
+        keyboard = create_combined_keyboard(
+            results["subgram"], 
+            results["tgrass"], 
+            results["flyer"]
+        )
+        
+        # Формируем сообщение о том, что осталось сделать
+        message_text = "✅ SubGram проверка пройдена!\n\n"
+        
+        if results["tgrass"] and results["tgrass"].get("status") == "not_ok":
+            message_text += "Теперь необходимо выполнить задания Tgrass:\n"
+        elif results["flyer"] and results["flyer"].get("result") and len(results["flyer"].get("result", [])) > 0:
+            message_text += "Теперь необходимо выполнить задания Flyer:\n"
+        else:
+            message_text += "Выполните оставшиеся задания:\n"
+        
+        await callback.message.answer(
+            message_text,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+        return
+    
+    await send_welcome(callback.message)
 
 # ================== БАЗА ДАННЫХ ДЛЯ ССЫЛОК И СОЗДАТЕЛЕЙ ==================
 
@@ -306,51 +857,6 @@ def get_statistics():
         'active_creators': active_creators
     }
 
-# ================== SubGram ФУНКЦИИ ==================
-
-async def get_subgram_sponsors(user_id: int, chat_id: int) -> dict | None:
-    headers = {"Auth": SUBGRAM_API_KEY}
-    payload = {"user_id": user_id, "chat_id": chat_id}
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                SUBGRAM_URL,
-                headers=headers,
-                json=payload,
-                timeout=10
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
-                else:
-                    logging.error(f"SubGram API error: {response.status}")
-                    return None
-    except asyncio.TimeoutError:
-        logging.error("SubGram API timeout")
-        return None
-    except Exception as e:
-        logging.error(f"SubGram API error: {e}")
-        return None
-
-def create_subscription_keyboard(sponsors_data):
-    """Создание клавиатуры с каналами для подписки"""
-    sponsors = sponsors_data.get("sponsors", [])
-    keyboard = []
-    
-    for sponsor in sponsors:
-        button = InlineKeyboardButton(
-            text=sponsor.get("name", "Канал"),
-            url=sponsor.get("url", "#")
-        )
-        keyboard.append([button])
-    
-    keyboard.append([InlineKeyboardButton(
-        text="✅ Проверить подписку",
-        callback_data="check_subscription"
-    )])
-    
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
 # ================== ФУНКЦИИ ФОРМАТИРОВАНИЯ ==================
 
 def format_script_for_display(script_content: str) -> str:
@@ -454,14 +960,25 @@ async def start_handler(message: types.Message):
     
     USERS.add(message.from_user.id)
     
+    # Сначала проверяем подписки через все три сервиса
     if len(message.text.split()) > 1:
         unique_code = message.text.split()[1]
         
-        response = await get_subgram_sponsors(message.from_user.id, message.chat.id)
+        # Проверяем все подписки
+        results = await check_all_subscriptions(
+            user_id=message.from_user.id,
+            username=message.from_user.username,
+            lang=message.from_user.language_code,
+            is_premium=message.from_user.is_premium
+        )
         
-        if response and response.get("status") == "warning":
-            keyboard = create_subscription_keyboard(response)
-            warning_message = "❗ Чтобы получить доступ к боту, подпишитесь на следующие каналы:"
+        if not results["all_passed"]:
+            keyboard = create_combined_keyboard(
+                results["subgram"], 
+                results["tgrass"], 
+                results["flyer"]
+            )
+            warning_message = "❗ Чтобы получить доступ к боту, выполните следующие задания:"
             
             await message.answer(
                 warning_message,
@@ -479,11 +996,21 @@ async def start_handler(message: types.Message):
             await message.answer("❌ Ссылка не найдена или устарела")
             return
     
-    response = await get_subgram_sponsors(message.from_user.id, message.chat.id)
-
-    if response and response.get("status") == "warning":
-        keyboard = create_subscription_keyboard(response)
-        warning_message = "❗ Чтобы получить доступ к боту, подпишитесь на следующие каналы:"
+    # Проверяем все подписки для обычного /start
+    results = await check_all_subscriptions(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        lang=message.from_user.language_code,
+        is_premium=message.from_user.is_premium
+    )
+    
+    if not results["all_passed"]:
+        keyboard = create_combined_keyboard(
+            results["subgram"], 
+            results["tgrass"], 
+            results["flyer"]
+        )
+        warning_message = "❗ Чтобы получить доступ к боту, выполните следующие задания:"
         
         await message.answer(
             warning_message,
@@ -555,31 +1082,6 @@ async def show_script_content(message: types.Message, script_data: dict):
             reply_markup=keyboard,
             parse_mode="HTML"
         )
-
-@router.callback_query(F.data == "check_subscription")
-async def check_subscription_callback(callback: types.CallbackQuery):
-    """Проверка подписки"""
-    await callback.answer("⏳ Проверяем подписку...")
-    
-    try:
-        await callback.message.delete()
-    except:
-        pass
-    
-    response = await get_subgram_sponsors(callback.from_user.id, callback.message.chat.id)
-    
-    if response and response.get("status") == "warning":
-        keyboard = create_subscription_keyboard(response)
-        warning_message = "❌ Вы еще не подписались на все каналы!\n\n❗ Чтобы получить доступ к боту, подпишитесь на следующие каналы:"
-        
-        await callback.message.answer(
-            warning_message,
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
-        return
-    
-    await send_welcome(callback.message)
 
 # ================== КОМАНДЫ ДЛЯ СОЗДАТЕЛЕЙ СКРИПТОВ ==================
 
@@ -749,7 +1251,11 @@ async def admin_panel(message: types.Message):
     
     admin_text += f"\n🔗 <b>Группа для скриптов:</b>\n"
     admin_text += f"ID: {GROUP_ID}\n"
-    admin_text += f"Топик: {TOPIC_ID}"
+    admin_text += f"Топик: {TOPIC_ID}\n\n"
+    admin_text += f"🔐 <b>Проверка подписок:</b>\n"
+    admin_text += f"• SubGram: ✅ Включено\n"
+    admin_text += f"• Tgrass: ✅ Включено\n"
+    admin_text += f"• Flyer: ✅ Включено"
 
     await message.answer(admin_text, reply_markup=keyboard, parse_mode="HTML")
 
@@ -783,6 +1289,8 @@ async def admin_stats_callback(callback: types.CallbackQuery):
         f"📤 Загрузка скриптов: <b>✅ Доступна всем</b>\n"
         f"🔗 Загрузка ссылок: <b>✅ Доступна всем</b>\n"
         f"🔗 Используется SubGram: <b>✅ Да</b>\n"
+        f"🔗 Используется Tgrass: <b>✅ Да</b>\n"
+        f"🔗 Используется Flyer: <b>✅ Да</b>\n"
         f"👥 Группа: <b>{GROUP_ID}</b>\n"
         f"📌 Топик: <b>{TOPIC_ID}</b>"
     )
@@ -1164,7 +1672,11 @@ async def back_to_admin_callback(callback: types.CallbackQuery):
     
     admin_text += f"\n🔗 <b>Группа для скриптов:</b>\n"
     admin_text += f"ID: {GROUP_ID}\n"
-    admin_text += f"Топик: {TOPIC_ID}"
+    admin_text += f"Топик: {TOPIC_ID}\n\n"
+    admin_text += f"🔐 <b>Проверка подписок:</b>\n"
+    admin_text += f"• SubGram: ✅ Включено\n"
+    admin_text += f"• Tgrass: ✅ Включено\n"
+    admin_text += f"• Flyer: ✅ Включено"
     
     await callback.message.edit_text(admin_text, reply_markup=keyboard, parse_mode="HTML")
 
@@ -1346,6 +1858,8 @@ async def main():
         logging.info(f"Бот запущен: @{me.username}")
         logging.info(f"ID группы для мониторинга: {GROUP_ID}")
         logging.info(f"ID топика: {TOPIC_ID}")
+        logging.info(f"Проверка подписок: SubGram + Tgrass + Flyer")
+        logging.info(f"ВАЖНО: Установите реальный FLYER_API_KEY и FLYER_API_BASE в настройках!")
     except Exception as e:
         logging.error(f"Ошибка при получении информации о боте: {e}")
     
@@ -1354,3 +1868,28 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
+    # ================== WEB SERVER ==================
+from fastapi import FastAPI
+import uvicorn
+
+app = FastAPI()
+
+@app.get("/")
+async def root():
+    return {"status": "bot is running"}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
+
+if __name__ == "__main__":
+    # Запуск в отдельном потоке
+    import threading
+    
+    # Запуск бота в отдельном потоке
+    bot_thread = threading.Thread(target=lambda: asyncio.run(main()))
+    bot_thread.start()
+    
+    # Запуск веб-сервера
+    uvicorn.run(app, host="0.0.0.0", port=8000)
