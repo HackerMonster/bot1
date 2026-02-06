@@ -8,7 +8,6 @@ import random
 import string
 from datetime import datetime
 import httpx
-import json
 
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.filters import CommandStart, Command
@@ -27,10 +26,6 @@ SUBGRAM_URL = "https://api.subgram.org/get-sponsors"
 TGRASS_API_URL = "https://tgrass.space/offers"
 TGRASS_API_KEY = "dd20d4a36f0e43b381194d7b5698dad6"
 
-# Flyer API настройки
-FLYER_API_BASE = "api.flyerservice.io"  # Замените на реальный базовый URL
-FLYER_API_KEY = "FL-ElINbD-pwBXBA-BZpBwY-DFIgFF"  # Замените на ваш ключ Flyer
-
 CHANNEL_URL = "https://t.me/script_f"
 ADMIN_ID = 5870949629
 BOT_USERNAME = "LinksSecret_Bot"
@@ -41,9 +36,6 @@ TOPIC_ID = 2  # ID топика, где будут отправляться ск
 
 # Для упрощения вместо БД используется список
 ALREADY_CHECKED_MESSAGES = []
-
-# Хранилище для Flyer задач (task_id -> signature)
-FLYER_TASKS = {}
 
 # ===============================================
 
@@ -64,132 +56,6 @@ broadcast_buttons = {}
 class BroadcastStates(StatesGroup):
     waiting_for_message = State()
     waiting_for_buttons = State()
-
-# ================== FLYER ФУНКЦИИ ==================
-
-async def get_flyer_tasks(user_id: int, language_code: str = "ru", limit: int = 10) -> dict | None:
-    """Получает задания от Flyer"""
-    try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            response = await client.post(
-                f"{FLYER_API_BASE}/get_tasks",
-                json={
-                    "key": FLYER_API_KEY,
-                    "user_id": int(user_id),
-                    "language_code": language_code or "ru",
-                    "limit": limit
-                },
-                headers={
-                    "accept": "application/json",
-                    "Content-Type": "application/json",
-                },
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                return data
-            else:
-                logging.error(f"Flyer API error: {response.status_code}, {response.text}")
-                return None
-    except asyncio.TimeoutError:
-        logging.error("Flyer API timeout")
-        return None
-    except Exception as e:
-        logging.error(f"Flyer API error: {e}")
-        return None
-
-async def check_flyer_task(signature: str) -> dict | None:
-    """Проверяет статус задания Flyer"""
-    try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            response = await client.post(
-                f"{FLYER_API_BASE}/check_task",
-                json={
-                    "key": FLYER_API_KEY,
-                    "signature": signature
-                },
-                headers={
-                    "accept": "application/json",
-                    "Content-Type": "application/json",
-                },
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logging.error(f"Flyer check task error: {response.status_code}, {response.text}")
-                return None
-    except asyncio.TimeoutError:
-        logging.error("Flyer check task timeout")
-        return None
-    except Exception as e:
-        logging.error(f"Flyer check task error: {e}")
-        return None
-
-async def get_flyer_completed_tasks(user_id: int) -> dict | None:
-    """Получает выполненные задания Flyer"""
-    try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            response = await client.post(
-                f"{FLYER_API_BASE}/get_completed_tasks",
-                json={
-                    "key": FLYER_API_KEY,
-                    "user_id": int(user_id)
-                },
-                headers={
-                    "accept": "application/json",
-                    "Content-Type": "application/json",
-                },
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logging.error(f"Flyer completed tasks error: {response.status_code}, {response.text}")
-                return None
-    except asyncio.TimeoutError:
-        logging.error("Flyer completed tasks timeout")
-        return None
-    except Exception as e:
-        logging.error(f"Flyer completed tasks error: {e}")
-        return None
-
-def create_flyer_keyboard(tasks_data):
-    """Создание клавиатуры с заданиями Flyer"""
-    tasks = tasks_data.get("result", [])
-    keyboard = []
-    
-    for task in tasks:
-        if isinstance(task, dict):
-            # Предполагаем структуру задания
-            url = task.get("url", task.get("link", "#"))
-            name = task.get("name", task.get("title", "Задание"))
-            task_id = task.get("id", task.get("signature", ""))
-            
-            # Сохраняем связь для последующей проверки
-            if task_id:
-                button_id = f"flyer_{task_id}"
-                FLYER_TASKS[button_id] = {
-                    "signature": task_id,
-                    "url": url,
-                    "name": name
-                }
-                
-                button = InlineKeyboardButton(
-                    text=name,
-                    url=url
-                )
-                keyboard.append([button])
-    
-    if keyboard:  # Если есть задания
-        keyboard.append([
-            InlineKeyboardButton(
-                text="✅ Проверить задания Flyer",
-                callback_data="check_flyer_all"
-            )
-        ])
-    
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # ================== TGRASS ФУНКЦИИ ==================
 
@@ -293,11 +159,10 @@ def create_subgram_keyboard(sponsors_data):
 # ================== КОМБИНИРОВАННАЯ ПРОВЕРКА ПОДПИСОК ==================
 
 async def check_all_subscriptions(user_id: int, username: str = None, lang: str = "ru", is_premium: bool = False):
-    """Проверяет подписки через все три сервиса (SubGram, Tgrass и Flyer)"""
+    """Проверяет подписки через SubGram и Tgrass"""
     results = {
         "subgram": None,
         "tgrass": None,
-        "flyer": None,
         "all_passed": False
     }
     
@@ -307,24 +172,16 @@ async def check_all_subscriptions(user_id: int, username: str = None, lang: str 
     # Проверяем Tgrass
     results["tgrass"] = await get_tgrass_offers(user_id, username, lang, is_premium)
     
-    # Проверяем Flyer
-    results["flyer"] = await get_flyer_tasks(user_id, lang, limit=10)
-    
     # Определяем, прошли ли все проверки
     subgram_passed = results["subgram"] is None or results["subgram"].get("status") != "warning"
     tgrass_passed = results["tgrass"] is None or (results["tgrass"].get("status") != "not_ok" and results["tgrass"].get("status") != "warning")
-    flyer_passed = True  # По умолчанию считаем, что Flyer пройден, если нет ошибок
     
-    # Если Flyer вернул задания, значит еще не все выполнены
-    if results["flyer"] and results["flyer"].get("result") and len(results["flyer"].get("result", [])) > 0:
-        flyer_passed = False
-    
-    results["all_passed"] = subgram_passed and tgrass_passed and flyer_passed
+    results["all_passed"] = subgram_passed and tgrass_passed
     
     return results
 
-def create_combined_keyboard(subgram_data, tgrass_data, flyer_data):
-    """Создает комбинированную клавиатуру с заданиями от всех трех сервисов"""
+def create_combined_keyboard(subgram_data, tgrass_data):
+    """Создает комбинированную клавиатуру с заданиями от SubGram и Tgrass"""
     keyboard = []
     has_tasks = False
     
@@ -350,21 +207,6 @@ def create_combined_keyboard(subgram_data, tgrass_data, flyer_data):
                 url=offer.get("link", "#")
             )
             keyboard.append([button])
-    
-    # Добавляем задания из Flyer
-    if flyer_data and flyer_data.get("result") and len(flyer_data.get("result", [])) > 0:
-        has_tasks = True
-        tasks = flyer_data.get("result", [])
-        for task in tasks:
-            if isinstance(task, dict):
-                name = task.get("name", task.get("title", "Задание"))
-                url = task.get("url", task.get("link", "#"))
-                
-                button = InlineKeyboardButton(
-                    text=f"🚀 {name}",
-                    url=url
-                )
-                keyboard.append([button])
     
     # Добавляем кнопки проверки для всех сервисов
     if has_tasks:
@@ -409,19 +251,11 @@ async def check_all_subscriptions_callback(callback: types.CallbackQuery):
             error_messages.append("Tgrass: ❌ Вы не выполнили все задания")
             has_tasks = True
         
-        if results["flyer"] and results["flyer"].get("result") and len(results["flyer"].get("result", [])) > 0:
-            error_messages.append("Flyer: ❌ Вы не выполнили все задания")
-            has_tasks = True
-        
         if has_tasks:
             error_text = "❌ Проверка не пройдена:\n\n"
             error_text += "\n".join(error_messages)
             
-            keyboard = create_combined_keyboard(
-                results["subgram"], 
-                results["tgrass"], 
-                results["flyer"]
-            )
+            keyboard = create_combined_keyboard(results["subgram"], results["tgrass"])
             
             await callback.message.answer(
                 error_text,
@@ -432,59 +266,6 @@ async def check_all_subscriptions_callback(callback: types.CallbackQuery):
     
     # Если все проверки пройдены
     await send_welcome(callback.message)
-
-# ================== FLYER ОБРАБОТЧИКИ ==================
-
-@router.callback_query(F.data == "check_flyer_all")
-async def check_flyer_all_callback(callback: types.CallbackQuery):
-    """Проверка всех заданий Flyer"""
-    await callback.answer("⏳ Проверяем задания Flyer...")
-    
-    # Проверяем выполненные задания
-    completed_tasks = await get_flyer_completed_tasks(callback.from_user.id)
-    
-    if completed_tasks:
-        count_all = completed_tasks.get("result", {}).get("count_all_tasks", 0)
-        completed = completed_tasks.get("result", {}).get("completed_tasks", [])
-        completed_count = len(completed) if isinstance(completed, list) else 0
-        
-        if completed_count >= count_all:
-            await callback.message.answer("✅ Все задания Flyer выполнены!")
-            
-            # Проверяем другие сервисы
-            results = await check_all_subscriptions(
-                user_id=callback.from_user.id,
-                username=callback.from_user.username,
-                lang=callback.from_user.language_code,
-                is_premium=callback.from_user.is_premium
-            )
-            
-            if results["all_passed"]:
-                await send_welcome(callback.message)
-            else:
-                keyboard = create_combined_keyboard(
-                    results["subgram"], 
-                    results["tgrass"], 
-                    results["flyer"]
-                )
-                await callback.message.answer(
-                    "✅ Flyer пройден!\n\nНо есть другие задания:",
-                    reply_markup=keyboard,
-                    parse_mode="HTML"
-                )
-        else:
-            # Получаем текущие задания
-            flyer_tasks = await get_flyer_tasks(callback.from_user.id, callback.from_user.language_code)
-            
-            if flyer_tasks and flyer_tasks.get("result"):
-                keyboard = create_flyer_keyboard(flyer_tasks)
-                await callback.message.answer(
-                    f"❌ Выполнено {completed_count}/{count_all} заданий Flyer\n\nПродолжайте выполнять задания:",
-                    reply_markup=keyboard,
-                    parse_mode="HTML"
-                )
-    else:
-        await callback.message.answer("❌ Не удалось проверить задания Flyer")
 
 # ================== TGRASS КОМАНДА ==================
 
@@ -535,7 +316,6 @@ async def check_tgrass_handler(callback_query: types.CallbackQuery):
 
 async def send_coins_to_user(callback_query: types.CallbackQuery):
     """Функция для награждения пользователя"""
-    # Здесь можно добавить логику награждения (например, начисление валюты в вашей системе)
     await callback_query.message.answer(
         "🎉 Вы получили награду за выполнение задания!",
         parse_mode="HTML"
@@ -566,7 +346,7 @@ async def check_subscription_callback(callback: types.CallbackQuery):
         )
         return
     
-    # После проверки SubGram проверяем другие сервисы
+    # После проверки SubGram проверяем Tgrass
     results = await check_all_subscriptions(
         user_id=callback.from_user.id,
         username=callback.from_user.username,
@@ -575,19 +355,13 @@ async def check_subscription_callback(callback: types.CallbackQuery):
     )
     
     if not results["all_passed"]:
-        keyboard = create_combined_keyboard(
-            results["subgram"], 
-            results["tgrass"], 
-            results["flyer"]
-        )
+        keyboard = create_combined_keyboard(results["subgram"], results["tgrass"])
         
         # Формируем сообщение о том, что осталось сделать
         message_text = "✅ SubGram проверка пройдена!\n\n"
         
         if results["tgrass"] and results["tgrass"].get("status") == "not_ok":
             message_text += "Теперь необходимо выполнить задания Tgrass:\n"
-        elif results["flyer"] and results["flyer"].get("result") and len(results["flyer"].get("result", [])) > 0:
-            message_text += "Теперь необходимо выполнить задания Flyer:\n"
         else:
             message_text += "Выполните оставшиеся задания:\n"
         
@@ -603,7 +377,7 @@ async def check_subscription_callback(callback: types.CallbackQuery):
 # ================== БАЗА ДАННЫХ ДЛЯ ССЫЛОК И СОЗДАТЕЛЕЙ ==================
 
 def init_database():
-    """Инициализация базы данных для скриптов и создателей"""
+    """Инициализация базы данных для скриптов"""
     conn = None
     try:
         if os.path.exists('scripts.db'):
@@ -645,7 +419,7 @@ def init_database():
             conn = sqlite3.connect('scripts.db')
             cursor = conn.cursor()
         
-        # Создаем таблицы если их нет
+        # Создаем таблицу скриптов
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS scripts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -660,23 +434,6 @@ def init_database():
         )
         ''')
         
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS script_creators (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER UNIQUE NOT NULL,
-            username TEXT,
-            full_name TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            is_active BOOLEAN DEFAULT 1
-        )
-        ''')
-        
-        # Добавляем админа если его нет
-        cursor.execute('SELECT 1 FROM script_creators WHERE user_id = ?', (ADMIN_ID,))
-        if not cursor.fetchone():
-            cursor.execute('INSERT OR IGNORE INTO script_creators (user_id, username, full_name) VALUES (?, ?, ?)',
-                          (ADMIN_ID, 'admin', 'Главный Администратор'))
-        
         conn.commit()
         print("База данных инициализирована")
         
@@ -688,74 +445,6 @@ def init_database():
             conn.close()
 
 init_database()
-
-# ================== ФУНКЦИИ ДЛЯ РАБОТЫ С СОЗДАТЕЛЯМИ ==================
-
-def is_script_creator(user_id: int) -> bool:
-    """Проверяет, является ли пользователь создателем скриптов"""
-    if user_id == ADMIN_ID:
-        return True
-    
-    conn = sqlite3.connect('scripts.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('SELECT 1 FROM script_creators WHERE user_id = ? AND is_active = 1', (user_id,))
-    result = cursor.fetchone()
-    
-    conn.close()
-    
-    return result is not None
-
-def add_script_creator(user_id: int, username: str = None, full_name: str = None) -> bool:
-    """Добавляет пользователя в создатели скриптов"""
-    conn = sqlite3.connect('scripts.db')
-    cursor = conn.cursor()
-    
-    try:
-        cursor.execute('''
-        INSERT OR REPLACE INTO script_creators (user_id, username, full_name, is_active)
-        VALUES (?, ?, ?, 1)
-        ''', (user_id, username, full_name))
-        
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logging.error(f"Error adding script creator: {e}")
-        conn.close()
-        return False
-
-def remove_script_creator(user_id: int) -> bool:
-    """Удаляет пользователя из создателей скриптов"""
-    conn = sqlite3.connect('scripts.db')
-    cursor = conn.cursor()
-    
-    try:
-        cursor.execute('DELETE FROM script_creators WHERE user_id = ?', (user_id,))
-        
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logging.error(f"Error removing script creator: {e}")
-        conn.close()
-        return False
-
-def get_all_script_creators():
-    """Получает список всех создателей скриптов"""
-    conn = sqlite3.connect('scripts.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    SELECT user_id, username, full_name, created_at, is_active 
-    FROM script_creators 
-    ORDER BY created_at DESC
-    ''')
-    
-    creators = cursor.fetchall()
-    conn.close()
-    
-    return creators
 
 # ================== ФУНКЦИИ ДЛЯ РАБОТЫ С БД ==================
 
@@ -779,7 +468,6 @@ def save_script_to_db(script_content: str, created_by: int, is_public=True, is_s
     
     # Для специальных скриптов (ссылкой) используем фиксированный текст
     if is_special:
-        # Сохраняем текст как на второй фотографии
         script_content = "<b>Ваш скрипт ⬇️</b>"
     
     cursor.execute('''
@@ -833,16 +521,9 @@ def get_statistics():
         cursor.execute("SELECT COUNT(*) FROM scripts WHERE is_special = 1")
         special_scripts = cursor.fetchone()[0]
         
-        cursor.execute("SELECT COUNT(*) FROM script_creators")
-        total_creators = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM script_creators WHERE is_active = 1")
-        active_creators = cursor.fetchone()[0]
-        
     except Exception as e:
         logging.error(f"Ошибка при получении статистики: {e}")
         total_scripts = admin_scripts = user_scripts = public_scripts = special_scripts = 0
-        total_creators = active_creators = 0
     
     conn.close()
     
@@ -852,9 +533,7 @@ def get_statistics():
         'user_scripts': user_scripts,
         'public_scripts': public_scripts,
         'special_scripts': special_scripts,
-        'total_users': len(USERS),
-        'total_creators': total_creators,
-        'active_creators': active_creators
+        'total_users': len(USERS)
     }
 
 # ================== ФУНКЦИИ ФОРМАТИРОВАНИЯ ==================
@@ -890,12 +569,10 @@ def parse_buttons(buttons_text: str):
     """Парсинг кнопок из текста"""
     buttons = []
     
-    # Разделяем ряды кнопок
     rows = buttons_text.strip().split('\n')
     
     for row in rows:
         row_buttons = []
-        # Разделяем кнопки в ряду
         button_pairs = [btn.strip() for btn in row.split('|') if btn.strip()]
         
         for button_pair in button_pairs:
@@ -960,7 +637,7 @@ async def start_handler(message: types.Message):
     
     USERS.add(message.from_user.id)
     
-    # Сначала проверяем подписки через все три сервиса
+    # Сначала проверяем подписки
     if len(message.text.split()) > 1:
         unique_code = message.text.split()[1]
         
@@ -973,11 +650,7 @@ async def start_handler(message: types.Message):
         )
         
         if not results["all_passed"]:
-            keyboard = create_combined_keyboard(
-                results["subgram"], 
-                results["tgrass"], 
-                results["flyer"]
-            )
+            keyboard = create_combined_keyboard(results["subgram"], results["tgrass"])
             warning_message = "❗ Чтобы получить доступ к боту, выполните следующие задания:"
             
             await message.answer(
@@ -993,7 +666,7 @@ async def start_handler(message: types.Message):
             await show_script_content(message, script_data)
             return
         else:
-            await message.answer("❌ Ссылка не найдена или устарела")
+            await message.answer("❌ Не удалось открыть ссылку\nВозможно, она устарела, содержит ошибку или контент был удалён.")
             return
     
     # Проверяем все подписки для обычного /start
@@ -1005,11 +678,7 @@ async def start_handler(message: types.Message):
     )
     
     if not results["all_passed"]:
-        keyboard = create_combined_keyboard(
-            results["subgram"], 
-            results["tgrass"], 
-            results["flyer"]
-        )
+        keyboard = create_combined_keyboard(results["subgram"], results["tgrass"])
         warning_message = "❗ Чтобы получить доступ к боту, выполните следующие задания:"
         
         await message.answer(
@@ -1029,12 +698,11 @@ async def show_script_content(message: types.Message, script_data: dict):
     
     if is_special:
         # Специальный режим - только ссылка
-        # Как на второй фотографии: оставляем "Ваш скрипт" и кнопку
-        header_text = ""  # Убираем "✅ | Спасибо за подписки!"
-        script_text = "<b>Ваш скрипт ⬇️</b>"  # Оставляем как на второй фотке
-        footer_text = ""  # Убираем "@{BOT_USERNAME}"
+        header_text = ""
+        script_text = "<b>Ваш скрипт ⬇️</b>"
+        footer_text = ""
         
-        final_text = script_text  # Только "Ваш скрипт ⬇️"
+        final_text = script_text
         
         keyboard_buttons = []
         
@@ -1048,7 +716,6 @@ async def show_script_content(message: types.Message, script_data: dict):
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons) if keyboard_buttons else None
         
-        # Отправляем сообщение как на второй фотке
         await message.answer(
             final_text,
             reply_markup=keyboard,
@@ -1056,7 +723,7 @@ async def show_script_content(message: types.Message, script_data: dict):
         )
         
     else:
-        # Обычный режим - оставляем как было
+        # Обычный режим
         formatted_script = format_script_for_display(script_content)
         
         header_text = "<b>✅ | Спасибо за подписки!</b>\n\n"
@@ -1083,158 +750,29 @@ async def show_script_content(message: types.Message, script_data: dict):
             parse_mode="HTML"
         )
 
-# ================== КОМАНДЫ ДЛЯ СОЗДАТЕЛЕЙ СКРИПТОВ ==================
-
-@router.message(Command("oplink"))
-async def add_creator_command(message: types.Message):
-    """Добавление создателя скриптов"""
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ У вас нет прав для выполнения этой команды")
-        return
-    
-    if len(message.text.split()) < 2:
-        await message.answer(
-            "❌ <b>Использование:</b> /oplink [id]\n\n"
-            "<b>Пример:</b>\n"
-            "<code>/oplink 123456789</code>\n\n"
-            "Чтобы получить ID пользователя, перешлите его сообщение боту @userinfobot",
-            parse_mode="HTML"
-        )
-        return
-    
-    try:
-        user_id = int(message.text.split()[1])
-        
-        if is_script_creator(user_id):
-            await message.answer(f"❌ Пользователь с ID {user_id} уже является создателем скриптов")
-            return
-        
-        try:
-            user = await message.bot.get_chat(user_id)
-            username = user.username
-            full_name = user.full_name
-        except:
-            username = None
-            full_name = f"User_{user_id}"
-        
-        if add_script_creator(user_id, username, full_name):
-            await message.answer(
-                f"✅ <b>Создатель скриптов добавлен!</b>\n\n"
-                f"👤 <b>ID:</b> <code>{user_id}</code>\n"
-                f"📛 <b>Имя:</b> {full_name}\n"
-                f"🔗 <b>Username:</b> @{username if username else 'нет'}\n\n"
-                f"Теперь этот пользователь может загружать скрипты через админ-панель.",
-                parse_mode="HTML"
-            )
-        else:
-            await message.answer("❌ Ошибка при добавлении создателя")
-            
-    except ValueError:
-        await message.answer("❌ Неверный формат ID. ID должен быть числом")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
-
-@router.message(Command("stoplink"))
-async def remove_creator_command(message: types.Message):
-    """Удаление создателя скриптов"""
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ У вас нет прав для выполнения этой команды")
-        return
-    
-    if len(message.text.split()) < 2:
-        await message.answer(
-            "❌ <b>Использование:</b> /stoplink [id]\n\n"
-            "<b>Пример:</b>\n"
-            "<code>/stoplink 123456789</code>\n\n"
-            "Чтобы посмотреть всех создателей, используйте /creators",
-            parse_mode="HTML"
-        )
-        return
-    
-    try:
-        user_id = int(message.text.split()[1])
-        
-        if not is_script_creator(user_id) or user_id == ADMIN_ID:
-            await message.answer(f"❌ Пользователь с ID {user_id} не является создателем скриптов")
-            return
-        
-        if remove_script_creator(user_id):
-            await message.answer(
-                f"✅ <b>Создатель скриптов удален!</b>\n\n"
-                f"👤 <b>ID:</b> <code>{user_id}</code>\n\n"
-                f"Теперь этот пользователь больше не может загружать скрипты.",
-                parse_mode="HTML"
-            )
-        else:
-            await message.answer("❌ Ошибка при удалении создателя")
-            
-    except ValueError:
-        await message.answer("❌ Неверный формат ID. ID должен быть числом")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
-
-@router.message(Command("creators"))
-async def list_creators_command(message: types.Message):
-    """Показывает список всех создателей скриптов"""
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ У вас нет прав для выполнения этой команды")
-        return
-    
-    creators = get_all_script_creators()
-    
-    if not creators:
-        await message.answer("📭 <b>Список создателей пуст</b>", parse_mode="HTML")
-        return
-    
-    text = "<b>👥 Список создателей скриптов:</b>\n\n"
-    
-    for i, (user_id, username, full_name, created_at, is_active) in enumerate(creators, 1):
-        status = "🟢 Активен" if is_active else "🔴 Неактивен"
-        text += f"{i}. <b>ID:</b> <code>{user_id}</code>\n"
-        text += f"   <b>Имя:</b> {full_name}\n"
-        text += f"   <b>Username:</b> @{username if username else 'нет'}\n"
-        text += f"   <b>Статус:</b> {status}\n"
-        text += f"   <b>Добавлен:</b> {created_at}\n\n"
-    
-    text += f"<b>Всего:</b> {len(creators)} создателей\n"
-    text += "<b>Используйте:</b>\n"
-    text += "/oplink [id] - добавить создателя\n"
-    text += "/stoplink [id] - удалить создателя"
-    
-    await message.answer(text, parse_mode="HTML")
-
 # ================== АДМИН ПАНЕЛЬ ==================
 
 @router.message(Command("admin"))
 async def admin_panel(message: types.Message):
-    """Админ панель для главного админа и создателей скриптов"""
+    """Админ панель для главного админа"""
     if message.chat.type != "private":
         return
         
-    if not (message.from_user.id == ADMIN_ID or is_script_creator(message.from_user.id)):
+    if message.from_user.id != ADMIN_ID:
         await message.answer("⛔ У вас нет доступа к админ-панели")
         return
 
     stats = get_statistics()
     
-    if message.from_user.id == ADMIN_ID:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
-                [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
-                [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")],
-                [InlineKeyboardButton(text="🔗 Загрузка ссылки", callback_data="admin_upload_link")],
-                [InlineKeyboardButton(text="👥 Публичные скрипты", callback_data="admin_public_scripts")],
-                [InlineKeyboardButton(text="👑 Управление создателями", callback_data="admin_manage_creators")]
-            ]
-        )
-    else:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")],
-                [InlineKeyboardButton(text="🔗 Загрузка ссылки", callback_data="admin_upload_link")]
-            ]
-        )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+            [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+            [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")],
+            [InlineKeyboardButton(text="🔗 Загрузка ссылки", callback_data="admin_upload_link")],
+            [InlineKeyboardButton(text="👥 Публичные скрипты", callback_data="admin_public_scripts")]
+        ]
+    )
 
     admin_text = (
         "👑 <b>Админ-панель</b>\n\n"
@@ -1246,16 +784,12 @@ async def admin_panel(message: types.Message):
         f"• 👑 Админских: {stats['admin_scripts']}\n"
     )
     
-    if message.from_user.id == ADMIN_ID:
-        admin_text += f"• 👥 Создателей: {stats['active_creators']}\n"
-    
     admin_text += f"\n🔗 <b>Группа для скриптов:</b>\n"
     admin_text += f"ID: {GROUP_ID}\n"
     admin_text += f"Топик: {TOPIC_ID}\n\n"
     admin_text += f"🔐 <b>Проверка подписок:</b>\n"
     admin_text += f"• SubGram: ✅ Включено\n"
-    admin_text += f"• Tgrass: ✅ Включено\n"
-    admin_text += f"• Flyer: ✅ Включено"
+    admin_text += f"• Tgrass: ✅ Включено"
 
     await message.answer(admin_text, reply_markup=keyboard, parse_mode="HTML")
 
@@ -1264,7 +798,7 @@ async def admin_panel(message: types.Message):
 @router.callback_query(F.data == "admin_stats")
 async def admin_stats_callback(callback: types.CallbackQuery):
     """Статистика бота"""
-    if not (callback.from_user.id == ADMIN_ID or is_script_creator(callback.from_user.id)):
+    if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
     
@@ -1277,20 +811,14 @@ async def admin_stats_callback(callback: types.CallbackQuery):
         f"🔗 Специальных ссылок: <b>{stats['special_scripts']}</b>\n"
         f"👤 Публичных скриптов: <b>{stats['public_scripts']}</b>\n"
         f"👑 Загружено админом: <b>{stats['admin_scripts']}</b>\n"
-        f"👥 Загружено пользователями: <b>{stats['user_scripts']}</b>\n"
+        f"👥 Загружено пользователями: <b>{stats['user_scripts']}</b>\n\n"
     )
-    
-    if callback.from_user.id == ADMIN_ID:
-        stats_text += f"👥 Создателей скриптов: <b>{stats['active_creators']}</b>\n\n"
-    else:
-        stats_text += "\n"
     
     stats_text += (
         f"📤 Загрузка скриптов: <b>✅ Доступна всем</b>\n"
         f"🔗 Загрузка ссылок: <b>✅ Доступна всем</b>\n"
         f"🔗 Используется SubGram: <b>✅ Да</b>\n"
         f"🔗 Используется Tgrass: <b>✅ Да</b>\n"
-        f"🔗 Используется Flyer: <b>✅ Да</b>\n"
         f"👥 Группа: <b>{GROUP_ID}</b>\n"
         f"📌 Топик: <b>{TOPIC_ID}</b>"
     )
@@ -1338,7 +866,7 @@ async def upload_link_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "admin_upload_script")
 async def admin_upload_script_callback(callback: types.CallbackQuery):
     """Загрузка скрипта из админ-панели"""
-    if not (callback.from_user.id == ADMIN_ID or is_script_creator(callback.from_user.id)):
+    if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
     
@@ -1356,7 +884,7 @@ async def admin_upload_script_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "admin_upload_link")
 async def admin_upload_link_callback(callback: types.CallbackQuery):
     """Загрузка ссылки из админ-панели"""
-    if not (callback.from_user.id == ADMIN_ID or is_script_creator(callback.from_user.id)):
+    if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
     
@@ -1377,7 +905,7 @@ async def admin_upload_link_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "admin_public_scripts")
 async def admin_public_scripts(callback: types.CallbackQuery):
     """Публичные скрипты"""
-    if not (callback.from_user.id == ADMIN_ID or is_script_creator(callback.from_user.id)):
+    if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
     
@@ -1424,43 +952,6 @@ async def admin_public_scripts(callback: types.CallbackQuery):
     )
     
     await callback.message.edit_text(stats_text, reply_markup=keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@router.callback_query(F.data == "admin_manage_creators")
-async def admin_manage_creators(callback: types.CallbackQuery):
-    """Управление создателями скриптов (только для главного админа)"""
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
-    
-    creators = get_all_script_creators()
-    
-    text = "<b>👑 Управление создателями скриптов</b>\n\n"
-    
-    if creators:
-        text += "<b>Текущие создатели:</b>\n"
-        for i, (user_id, username, full_name, created_at, is_active) in enumerate(creators, 1):
-            status = "🟢" if is_active else "🔴"
-            text += f"{i}. {status} <b>ID:</b> <code>{user_id}</code>\n"
-            text += f"   👤 {full_name}\n"
-            if username:
-                text += f"   📱 @{username}\n"
-            text += f"   📅 {created_at}\n\n"
-    else:
-        text += "📭 Создателей нет\n\n"
-    
-    text += "<b>Команды:</b>\n"
-    text += "<code>/oplink [id]</code> - добавить создателя\n"
-    text += "<code>/stoplink [id]</code> - удалить создателя\n"
-    text += "<code>/creators</code> - список всех создателей"
-    
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="back_to_admin")]
-        ]
-    )
-    
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
 # ================== РАССЫЛКА С КНОПКАМИ ==================
@@ -1632,30 +1123,21 @@ async def send_broadcast(message: types.Message, broadcast_data: dict, keyboard:
 @router.callback_query(F.data == "back_to_admin")
 async def back_to_admin_callback(callback: types.CallbackQuery):
     """Назад в админ-панель"""
-    if not (callback.from_user.id == ADMIN_ID or is_script_creator(callback.from_user.id)):
+    if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
     
     stats = get_statistics()
     
-    if callback.from_user.id == ADMIN_ID:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
-                [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
-                [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")],
-                [InlineKeyboardButton(text="🔗 Загрузка ссылки", callback_data="admin_upload_link")],
-                [InlineKeyboardButton(text="👥 Публичные скрипты", callback_data="admin_public_scripts")],
-                [InlineKeyboardButton(text="👑 Управление создателями", callback_data="admin_manage_creators")]
-            ]
-        )
-    else:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")],
-                [InlineKeyboardButton(text="🔗 Загрузка ссылки", callback_data="admin_upload_link")]
-            ]
-        )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+            [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+            [InlineKeyboardButton(text="📤 Загрузка скрипта", callback_data="admin_upload_script")],
+            [InlineKeyboardButton(text="🔗 Загрузка ссылки", callback_data="admin_upload_link")],
+            [InlineKeyboardButton(text="👥 Публичные скрипты", callback_data="admin_public_scripts")]
+        ]
+    )
     
     admin_text = (
         "👑 <b>Админ-панель</b>\n\n"
@@ -1667,16 +1149,12 @@ async def back_to_admin_callback(callback: types.CallbackQuery):
         f"• 👑 Админских: {stats['admin_scripts']}\n"
     )
     
-    if callback.from_user.id == ADMIN_ID:
-        admin_text += f"• 👥 Создателей: {stats['active_creators']}\n"
-    
     admin_text += f"\n🔗 <b>Группа для скриптов:</b>\n"
     admin_text += f"ID: {GROUP_ID}\n"
     admin_text += f"Топик: {TOPIC_ID}\n\n"
     admin_text += f"🔐 <b>Проверка подписок:</b>\n"
     admin_text += f"• SubGram: ✅ Включено\n"
-    admin_text += f"• Tgrass: ✅ Включено\n"
-    admin_text += f"• Flyer: ✅ Включено"
+    admin_text += f"• Tgrass: ✅ Включено"
     
     await callback.message.edit_text(admin_text, reply_markup=keyboard, parse_mode="HTML")
 
@@ -1716,7 +1194,7 @@ async def handle_script_upload(message: types.Message):
             await message.answer("❌ Скрипт не может быть пустым или слишком коротким (минимум 10 символов).")
             return
         
-        # Сохраняем скрипт в базу данных (публичным для всех, обычный скрипт)
+        # Сохраняем скрипт в базу данных
         unique_code = save_script_to_db(script_content, message.from_user.id, is_public=True, is_special=False)
         
         # Создаем ссылку
@@ -1771,8 +1249,8 @@ async def handle_script_upload(message: types.Message):
                 await message.answer("❌ Это не валидная ссылка. Отправьте ссылку начинающуюся с http:// или https://")
                 return
             
-            # Создаем специальный скрипт с заголовком (текст будет заменен в save_script_to_db)
-            script_content = ""  # Пустой текст, так как будет заменен на "<b>Ваш скрипт ⬇️</b>"
+            # Создаем специальный скрипт
+            script_content = ""
             
             # Сохраняем в базу данных как специальный скрипт
             unique_code = save_script_to_db(
@@ -1839,7 +1317,7 @@ async def handle_other_messages(message: types.Message):
         return
     
     if not message.text or not message.text.startswith('/'):
-        if message.from_user.id != ADMIN_ID and not is_script_creator(message.from_user.id):
+        if message.from_user.id != ADMIN_ID:
             await message.answer(
                 "🤖 <b>Неизвестная команда, напишите /start</b>\n\n",
                 parse_mode="HTML"
@@ -1858,8 +1336,7 @@ async def main():
         logging.info(f"Бот запущен: @{me.username}")
         logging.info(f"ID группы для мониторинга: {GROUP_ID}")
         logging.info(f"ID топика: {TOPIC_ID}")
-        logging.info(f"Проверка подписок: SubGram + Tgrass + Flyer")
-        logging.info(f"ВАЖНО: Установите реальный FLYER_API_KEY и FLYER_API_BASE в настройках!")
+        logging.info(f"Проверка подписок: SubGram + Tgrass")
     except Exception as e:
         logging.error(f"Ошибка при получении информации о боте: {e}")
     
