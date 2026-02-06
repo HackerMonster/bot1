@@ -7,7 +7,6 @@ import re
 import random
 import string
 from datetime import datetime
-import httpx
 
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.filters import CommandStart, Command
@@ -34,7 +33,7 @@ BOT_USERNAME = "LinksSecret_Bot"
 GROUP_ID = -1001897612345  # Замените на ID вашей группы (должно быть отрицательным числом)
 TOPIC_ID = 2  # ID топика, где будут отправляться скрипты
 
-# Для упрощения вместо БД используется список
+# Для уппрощения вместо БД используется список
 ALREADY_CHECKED_MESSAGES = []
 
 # ===============================================
@@ -62,27 +61,32 @@ class BroadcastStates(StatesGroup):
 async def get_tgrass_offers(user_id: int, username: str = None, lang: str = "ru", is_premium: bool = False) -> dict | None:
     """Получает задания от Tgrass"""
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            response = await client.post(
+        # Используем aiohttp вместо httpx
+        headers = {
+            "accept": "application/json",
+            "Content-Type": "application/json",
+            "Auth": TGRASS_API_KEY,
+        }
+        
+        payload = {
+            "tg_user_id": int(user_id),
+            "tg_login": username or "",
+            "lang": lang or "ru",
+            "is_premium": is_premium,
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
                 TGRASS_API_URL,
-                json={
-                    "tg_user_id": int(user_id),
-                    "tg_login": username or "",
-                    "lang": lang or "ru",
-                    "is_premium": is_premium,
-                },
-                headers={
-                    "accept": "application/json",
-                    "Content-Type": "application/json",
-                    "Auth": TGRASS_API_KEY,
-                },
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logging.error(f"Tgrass API error: {response.status_code}")
-                return None
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as response:
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    logging.error(f"Tgrass API error: {response.status}")
+                    return None
     except asyncio.TimeoutError:
         logging.error("Tgrass API timeout")
         return None
@@ -123,7 +127,7 @@ async def get_subgram_sponsors(user_id: int, chat_id: int) -> dict | None:
                 SUBGRAM_URL,
                 headers=headers,
                 json=payload,
-                timeout=10
+                timeout=aiohttp.ClientTimeout(total=10)
             ) as response:
                 if response.status == 200:
                     return await response.json()
@@ -374,7 +378,7 @@ async def check_subscription_callback(callback: types.CallbackQuery):
     
     await send_welcome(callback.message)
 
-# ================== БАЗА ДАННЫХ ДЛЯ ССЫЛОК И СОЗДАТЕЛЕЙ ==================
+# ================== БАЗА ДАННЫХ ДЛЯ ССЫЛОК ==================
 
 def init_database():
     """Инициализация базы данных для скриптов"""
